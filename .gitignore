@@ -1,0 +1,22 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+
+# Go workspace / build
+*.test
+*.out
+coverage.txt
+
+# Local env
+.env
+.env.local
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Air hot reload
+tmp/

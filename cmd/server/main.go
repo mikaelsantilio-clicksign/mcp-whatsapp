@@ -1,0 +1,164 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/clicksign/whatsapp-mcp/internal/api"
+	"github.com/clicksign/whatsapp-mcp/internal/config"
+	"github.com/clicksign/whatsapp-mcp/internal/llm"
+	"github.com/clicksign/whatsapp-mcp/internal/logging"
+	"github.com/clicksign/whatsapp-mcp/internal/mcpclient"
+	"github.com/clicksign/whatsapp-mcp/internal/n8n"
+	"github.com/clicksign/whatsapp-mcp/internal/oauth"
+	"github.com/clicksign/whatsapp-mcp/internal/session"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "fatal:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	logger := logging.New(cfg.LogLevel)
+	slog.SetDefault(logger)
+
+	store := session.NewMemoryStore()
+
+	oauthClient := oauth.NewClient(cfg.MCPServerBaseURL)
+	signer := oauth.NewStateSigner(cfg.StateHMACSecret)
+
+	bootCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := bootstrapOAuthClient(bootCtx, logger, cfg, oauthClient, store); err != nil {
+		// Don't fail hard — log and continue. The /api/messages handler will
+		// re-attempt when needed (DCR is on the critical path of needs_auth).
+		logger.Error("oauth_bootstrap_failed", slog.String("err", err.Error()))
+	}
+
+	mcpManager := mcpclient.NewManager(cfg, logger, store, oauthClient)
+	conversation := llm.NewConversation(cfg, logger, mcpManager)
+	notifier := n8n.NewNotifier(logger, cfg.N8NWebhookURL, cfg.N8NWebhookToken)
+
+	messages := api.NewMessagesHandler(cfg, logger, store, oauthClient, signer, conversation)
+	oauthHandler := api.NewOAuthHandler(cfg, logger, store, oauthClient, signer, notifier)
+	health := api.NewHealthHandler(cfg)
+
+	r := chi.NewRouter()
+	r.Use(api.RequestID())
+	r.Use(api.AccessLog(logger))
+	r.Use(api.Recover(logger))
+
+	r.Get("/healthz", health.Get)
+	r.Get(cfg.OAuthRedirectPath, oauthHandler.Callback)
+	r.Get("/c/{token}", oauthHandler.ShortLink)
+
+	r.Group(func(r chi.Router) {
+		r.Use(api.StaticBearer(cfg.APIStaticToken))
+		r.Post("/api/messages", messages.Post)
+	})
+
+	addr := ":" + strconv.Itoa(cfg.Port)
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		logger.Info("server_starting",
+			slog.String("addr", addr),
+			slog.String("redirect_uri", cfg.RedirectURI()),
+			slog.String("mcp_endpoint", cfg.MCPEndpointURL()),
+		)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		logger.Info("server_shutting_down")
+	case err := <-errCh:
+		return err
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
+
+// bootstrapOAuthClient ensures we have a DCR client_id persisted. Runs once
+// per fresh deployment; subsequent restarts will reuse the stored value if
+// the session store is persistent (DynamoDB). With the in-memory store this
+// runs on every boot.
+func bootstrapOAuthClient(
+	ctx context.Context,
+	logger *slog.Logger,
+	cfg *config.Config,
+	client *oauth.Client,
+	store session.Store,
+) error {
+	if existing, err := store.GetClientRegistration(ctx); err == nil && existing.ClientID != "" {
+		logger.Info("oauth_client_existing",
+			slog.String("client_id_prefix", prefix(existing.ClientID, 8)),
+			slog.Time("registered_at", existing.RegisteredAt),
+		)
+		return nil
+	}
+
+	md, err := client.Discover(ctx)
+	if err != nil {
+		return fmt.Errorf("discovery: %w", err)
+	}
+	logger.Info("oauth_discovery_ok",
+		slog.String("issuer", md.Issuer),
+		slog.String("authorization_endpoint", md.AuthorizationEndpoint),
+		slog.String("token_endpoint", md.TokenEndpoint),
+		slog.String("registration_endpoint", md.RegistrationEndpoint),
+	)
+
+	reg, err := client.RegisterDynamic(ctx, cfg.RedirectURI(), cfg.MCPOAuthScopes)
+	if err != nil {
+		return fmt.Errorf("dcr: %w", err)
+	}
+	logger.Info("oauth_dcr_ok",
+		slog.String("client_id_prefix", prefix(reg.ClientID, 8)),
+	)
+	return store.PutClientRegistration(ctx, &session.ClientRegistration{
+		ClientID:                reg.ClientID,
+		RegisteredAt:            time.Now().UTC(),
+		TokenEndpointAuthMethod: reg.TokenEndpointAuthMethod,
+		RedirectURIs:            reg.RedirectURIs,
+	})
+}
+
+func prefix(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}

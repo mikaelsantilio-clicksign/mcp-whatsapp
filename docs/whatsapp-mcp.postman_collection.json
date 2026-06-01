@@ -1,0 +1,315 @@
+{
+  "info": {
+    "name": "whatsapp-mcp",
+    "description": "Simulação do fluxo n8n → whatsapp-mcp (POST /api/messages com Bearer estático). Inclui health check, fluxo OAuth needs_auth com captura automática do authorize_url/shortlink, conversa autenticada (com tool-calling MCP), idempotência e casos de erro.\n\nOrdem sugerida:\n1. Health\n2. Fluxo OAuth → First message → Follow shortlink → (login manual no browser)\n3. Conversa → liste templates → enviar envelope\n4. Casos de erro\n\nDefina `api_token` no environment com o mesmo valor de `API_STATIC_TOKEN` do .env do servidor.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "8b3e4c7a-2a1f-4e2b-9a3d-7c4f0a1d2c10"
+  },
+  "item": [
+    {
+      "name": "0. Health",
+      "item": [
+        {
+          "name": "GET /healthz",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/healthz",
+              "host": ["{{base_url}}"],
+              "path": ["healthz"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. OAuth flow",
+      "item": [
+        {
+          "name": "First message (expect needs_auth)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "if (body.status === 'needs_auth') {",
+                  "  pm.environment.set('authorize_url', body.authorize_url || '');",
+                  "  const match = (body.reply || '').match(/https?:\\/\\/[^\\s]+\\/c\\/[A-Z0-9]+/);",
+                  "  if (match) pm.environment.set('short_link', match[0]);",
+                  "  console.log('captured authorize_url:', body.authorize_url);",
+                  "  console.log('captured short_link:', pm.environment.get('short_link'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"olá\",\n  \"message_id\": \"wamid.0001\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Follow shortlink (302 → authorize_url)",
+          "description": "Reproduz o que o usuário faz ao clicar no link curto recebido no WhatsApp. Deve retornar 302 com Location apontando para o /oauth2/authorize da Clicksign.",
+          "protocolProfileBehavior": {"followRedirects": false},
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{short_link}}",
+              "host": ["{{short_link}}"]
+            }
+          }
+        },
+        {
+          "name": "(manual) Open authorize_url in browser",
+          "description": "Cole o valor de `{{authorize_url}}` em uma aba anônima do navegador. Faça login na Clicksign. Você será redirecionado para `{{base_url}}/oauth2/callback?code=…&state=…`, verá a página HTML de sucesso e (se N8N_WEBHOOK_URL estiver setado) o n8n receberá o webhook `oauth_success`.",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{authorize_url}}",
+              "host": ["{{authorize_url}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Authenticated conversation",
+      "item": [
+        {
+          "name": "List templates",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"liste meus templates\",\n  \"message_id\": \"wamid.0002\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Send envelope (template)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"envia o template Contrato Padrão para joao@example.com\",\n  \"message_id\": \"wamid.0003\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Confirm send",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"sim, pode enviar\",\n  \"message_id\": \"wamid.0004\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Message with attachment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"envia esse contrato pra maria@example.com\",\n  \"attachments\": [\n    {\n      \"url\": \"https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf\",\n      \"mime_type\": \"application/pdf\",\n      \"filename\": \"contrato.pdf\"\n    }\n  ],\n  \"message_id\": \"wamid.0005\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Error cases",
+      "item": [
+        {
+          "name": "No Authorization header → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"oi\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Wrong Bearer → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer wrong-token"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"oi\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Invalid payload → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Idempotency — first call",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"teste idempotencia\",\n  \"message_id\": \"wamid.dup-001\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Idempotency — duplicate (expect empty reply)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('reply is empty (deduped)', () => {",
+                  "  pm.expect(body.reply).to.eql('');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"teste idempotencia\",\n  \"message_id\": \"wamid.dup-001\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Shortlink inexistente → 410",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/c/INEXISTENTE12345",
+              "host": ["{{base_url}}"],
+              "path": ["c", "INEXISTENTE12345"]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {"key": "base_url", "value": "http://localhost:8080"},
+    {"key": "phone_number", "value": "+5511999999999"}
+  ]
+}
