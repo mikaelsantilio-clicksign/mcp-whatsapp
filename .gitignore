@@ -20,3 +20,6 @@ coverage.txt
 
 # Air hot reload
 tmp/
+
+# Research clones (não versionar codigo-fonte externo clonado para referencia)
+.research/

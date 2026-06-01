@@ -502,9 +502,131 @@ func (f *ListTemplatesFlow) Handle(ctx context.Context, in Input) (Result, error
 
 ---
 
-## 8. Cliente Clicksign REST
+## 8. Cliente Clicksign REST — endpoints e contratos REAIS
 
-### 8.1 Esqueleto
+> **Fonte autoritativa**: clonei o repo `clicksign/mcp-api-tavola-v3` (o MCP server é um proxy fino sobre a API REST da Clicksign) e extraí endpoints, headers, content-types e payloads diretamente do código. Os tipos e o cliente HTTP podem ser **portados quase sem mudanças** para acelerar a implementação.
+
+### 8.1 Configuração base
+
+- **Base URL (produção)**: `https://app.clicksign.com/api/v3`
+- **Base URL (staging)**: subdomínio equivalente (mesmo path)
+- **Formato de resposta**: JSON:API spec (`{"data": [...]}` em listas, `{"data": {...}}` em singletons)
+- **Headers em toda chamada autenticada**:
+  - `Authorization: Bearer <access_token>`
+  - `X-Account-Key: <account_key>` ← **CRÍTICO**: usuários multi-conta precisam disso em **toda** chamada. Sem ele, a API rejeita.
+- **Content-Type — varia por endpoint**:
+  - `application/json` → envelopes legados, signers, envelope bulk creations
+  - `application/vnd.api+json` → templates (criar/editar) e notificações
+  - `Accept: application/json` em todas
+
+### 8.2 Catálogo de endpoints (extraído de `internal/clicksign/client.go` do MCP)
+
+| Operação | Método | Path | Content-Type | Observação |
+|---|---|---|---|---|
+| Validar token | GET | `/users/me` | — | Checagem rápida pós-OAuth. |
+| **Listar contas OAuth2** | GET | `/oauth2/accounts` | — | Retorna `[OAuth2Account{id, attributes:{name, key}}]`. Não exige `X-Account-Key`. |
+| Listar templates | GET | `/templates` | — | JSON:API list. |
+| Campos de um template | GET | `/templates/{id}/template_fields` | — | Variáveis para interpolar no envelope. |
+| Criar template | POST | `/templates` | `application/vnd.api+json` | Body `{"data":{"type":"templates","attributes":{...}}}`. |
+| Editar template | PATCH | `/templates/{id}` | `application/vnd.api+json` | |
+| Deletar template | DELETE | `/templates/{id}` | — | |
+| Listar envelopes | GET | `/envelopes` | — | |
+| Detalhe envelope | GET | `/envelopes/{id}` | — | |
+| Listar documentos do envelope | GET | `/envelopes/{id}/documents` | — | |
+| Detalhe documento | GET | `/envelopes/{id}/documents/{did}` | — | |
+| Criar envelope (modo split, legado) | POST | `/envelopes` | `application/json` | Body `{"name":"..."}`. Preferir bulk_creations. |
+| Adicionar documento ao envelope | POST | `/envelopes/{id}/documents` | `application/json` | |
+| Adicionar signatário | POST | `/envelopes/{id}/signers` | `application/json` | Body `{"email":"..."}` no fluxo split. |
+| Disponibilizar para assinatura | POST | `/envelopes/{id}/available` | — | Coloca envelope em `running`. |
+| Notificar todos signatários | POST | `/envelopes/{id}/notifications` | `application/vnd.api+json` | |
+| Notificar signatário individual | POST | `/envelopes/{id}/signers/{sid}/notifications` | `application/vnd.api+json` | |
+| **Criar envelope completo (RECOMENDADO)** | POST | `/envelope_bulk_creations` | `application/json` | Envelope + documento (template **ou** PDF base64) + signers + notifications em **uma única chamada**. |
+
+> **Pendência detectada**: endpoint específico de **cancelar envelope** não está no cliente do MCP. Validar com docs públicas (`developers.clicksign.com`) antes da Fase 4.
+
+### 8.3 Padrão `envelope_bulk_creations` (caminho feliz pro `create_envelope_*`)
+
+O MCP usa este endpoint como caminho principal das tools `create_envelope_with_template` e `create_envelope_with_file_url`. É bulk porque encapsula tudo num payload só.
+
+Esqueleto do body (referência: `EnvelopeBulkCreationRequest` em `internal/clicksign/types.go` do MCP):
+
+```json
+{
+  "data": {
+    "type": "envelope_bulk_creations",
+    "attributes": {
+      "envelope": {
+        "name": "Contrato Stg WhatsApp 1",
+        "default_subject": "Assinatura do Contrato",
+        "locale": "pt-BR",
+        "auto_close": true,
+        "remind_interval": 3,
+        "block_after_refusal": false,
+        "metadata": { "source": "whatsapp-bot" }
+      },
+      "document": {
+        "filename": "Contrato.docx",
+        "metadata": { "source": "whatsapp-bot" },
+        "template": {
+          "key": "d782aa2e-146f-44a8-b31c-60c107896bd1",
+          "data": { "nome_contratado": "João Silva", "valor": "1.000" }
+        }
+        /* OU, no caso de PDF a partir de URL: substituir o bloco "template" por:
+           "content_base64": "data:application/pdf;base64,JVBERi0xLjQK...",
+           "filename": "Contrato.pdf"
+           (formato data URI completo, com prefixo "data:<mime>;base64," — NÃO base64 puro)
+        */
+      },
+      "signers": [
+        {
+          "name": "Mikael Nunes",
+          "email": "mikael@x.com",
+          "location_required_enabled": false,
+          "has_documentation": true,
+          "refusable": false,
+          "requirements": [
+            { "action": "agree", "role": "party" },
+            { "action": "provide_evidence", "auth": "email" }
+          ]
+        }
+      ],
+      "notifications": { "message": "Por favor, assine o contrato." }
+    }
+  }
+}
+```
+
+**Regras críticas de signatário** (resumo de `docs/PAYLOAD_SIGNERS.md`):
+
+- `name` obrigatório, com nome **e** sobrenome, sem números.
+- Cada signer precisa de **dois `requirements`**: um `{action:"agree", role:"<papel>"}` (qualificação) e um `{action:"provide_evidence", auth:"<método>"}` (autenticação).
+- `email` obrigatório se `auth=email`; `phone_number` (10–11 dígitos) se `auth=sms` ou `auth=whatsapp`.
+- Roles canônicos mais comuns: `party`, `sign`, `witness`, `approve`. Existe um glossário PT→EN com 50+ termos em `internal/mcp/validation.go` do MCP — vale **portar tal qual**.
+- `auth=presential` **não** é aceito pela API.
+- Se `has_documentation=false`, não enviar `documentation` nem `birthday`.
+
+**Erros frequentes da API** (extraídos de `docs/PAYLOAD_ENVELOPE_DOCUMENT.md`):
+
+| Erro retornado | Causa | Mitigação no flow |
+|---|---|---|
+| `remind_interval deve ser maior que 0` | `remind_interval=0` ou negativo | Default `3`; omitir se zero. |
+| `source campo é obrigatório` (envelope/document) | metadata sem `source` | Sempre setar `metadata.source = "whatsapp-bot"`. |
+| `filename deve ter formato válido (.doc ou .docx)` | extensão errada | Validar antes (template aceita só doc/docx; file_url aceita pdf/jpg/png/txt/doc/docx). |
+| `data deve ser um objeto` | `document.template.data` ausente ou não-objeto | Sempre enviar objeto (mesmo vazio: `{}`). |
+
+### 8.4 Multi-conta — detecção e tratamento determinístico
+
+No MCP server, quando o `X-Account-Key` não foi enviado e o usuário tem múltiplas contas, a Clicksign devolve erro e o MCP transforma em mensagem human-readable. **No Option B fazemos isso sem LLM**:
+
+1. Flow tenta a operação real (ex.: `GET /templates`) sem `X-Account-Key`.
+2. Cliente HTTP detecta erro tipo `ErrMultiAccount` (status 4xx + payload específico).
+3. Flow chama `GET /oauth2/accounts` para obter a lista.
+4. Devolve `Result{Kind: KindChoose, Interactive: ListPayload(contas)}`.
+5. Usuário clica → `interactive_reply.list_item_id = "<account_key>"` → persiste `sess.PreferredAccount` → re-executa a operação original.
+
+A partir daí, **toda chamada** do cliente HTTP envia `X-Account-Key: sess.PreferredAccount`.
+
+### 8.5 Esqueleto do cliente Go (adaptado direto do MCP)
 
 ```go
 // internal/clicksign/client.go
@@ -516,50 +638,113 @@ type Client struct {
     oauth   *oauth.Client
 }
 
-func (c *Client) do(ctx context.Context, phone, method, path string, body any) ([]byte, error) {
+func (c *Client) do(ctx context.Context, phone, method, path, contentType string, body io.Reader) ([]byte, error) {
     sess, err := c.store.GetSession(ctx, phone)
-    if err != nil {
-        return nil, conv.ErrSessionExpired
-    }
-    req, _ := buildRequest(c.baseURL, method, path, body)
+    if err != nil { return nil, conv.ErrSessionExpired }
+
+    req, _ := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
     req.Header.Set("Authorization", "Bearer "+sess.AccessToken)
     req.Header.Set("Accept", "application/json")
+    if sess.PreferredAccount != "" {
+        req.Header.Set("X-Account-Key", sess.PreferredAccount)
+    }
+    if contentType != "" { req.Header.Set("Content-Type", contentType) }
 
-    resp, err := c.httpc.Do(req.WithContext(ctx))
+    resp, err := c.httpc.Do(req)
     if err != nil { return nil, err }
     defer resp.Body.Close()
+    raw, _ := io.ReadAll(resp.Body)
 
     if resp.StatusCode == 401 {
-        // refresh + retry uma vez (lógica já existe em mcpclient.Manager.refresh)
         if err := c.refresh(ctx, phone); err != nil { return nil, conv.ErrSessionExpired }
-        return c.do(ctx, phone, method, path, body) // recurse uma vez
+        return c.do(ctx, phone, method, path, contentType, body) // retry uma vez
+    }
+    if isMultiAccountErr(resp.StatusCode, raw) {
+        return nil, ErrMultiAccount{Body: raw}
     }
     if resp.StatusCode >= 400 {
-        return nil, decodeError(resp)
+        return nil, decodeError(resp.StatusCode, raw)
     }
-    return io.ReadAll(resp.Body)
+    return raw, nil
 }
+
+// Métodos tipados: ListAccounts, ListTemplates, GetTemplateFields,
+// CreateEnvelopeBulk, ListEnvelopes, GetEnvelope, NotifyEnvelope, etc.
 ```
 
-### 8.2 Endpoints alvo (a confirmar com a doc)
+### 8.6 Reaproveitamento direto do mcp-api-tavola-v3
 
-| Operação | HTTP |
+A maior alavanca de produtividade: **portar arquivos quase como estão** do MCP server.
+
+| Arquivo do MCP (`clicksign/mcp-api-tavola-v3`) | Destino no nosso projeto | Mudanças necessárias |
+|---|---|---|
+| `internal/clicksign/types.go` | `internal/clicksign/types.go` | **Zero**. Copiar tal qual — DTOs JSON:API (Envelope, Document, Signer, Template, OAuth2Account, EnvelopeBulkCreation*, etc.). |
+| `internal/clicksign/client.go` | `internal/clicksign/client.go` | **Pequenas**: remover `OAuth2Credentials` encode/parse (usaremos `session.Session` direto); adicionar `refresh` chamando nosso `oauth.Client`. |
+| `internal/clicksign/file_fetcher.go` | `internal/clicksign/file_fetcher.go` | **Zero ou pequenas**. Implementa download de URL com SSRF protection — útil pro `create_envelope_with_file_url`. |
+| `internal/mcp/validation.go` (regras de signer + glossário PT→EN de roles) | `internal/clicksign/validation.go` | **Médias**: remover dependências MCP, manter `NormalizeRole`, validação de CPF/email/phone, regras de requirements. |
+| `docs/PAYLOAD_SIGNERS.md` + `PAYLOAD_ENVELOPE_DOCUMENT*.md` | `docs/` ou `internal/clicksign/prompts/` | **Zero**. Referência viva pro NLU prompt e pra testes. |
+
+> Atalho prático: criar uma pasta `internal/clicksign/` no nosso projeto e fazer `cp` dos quatro arquivos do MCP, ajustando imports.
+
+### 8.7 Upload de PDF/imagem via URL (caminho B do bulk creation)
+
+> **Quando usar**: usuário do WhatsApp envia uma URL pública (ex.: `https://storage.empresa.com/contrato.pdf`) em vez de escolher um template. O backend baixa o arquivo, valida e converte em **data URI base64** antes de enviar para a Clicksign.
+
+**O LLM nunca vê o binário.** Ele só recebe a URL como string no payload da mensagem. O download e a codificação acontecem no Flow `create_envelope_pdf`, depois do NLU.
+
+#### Pipeline
+
+```
+[WhatsApp]  →  URL como string
+   ↓
+[NLU LLM]   →  extrai { intent: "create_envelope", document.file_url: "..." }
+   ↓
+[Flow create_envelope_pdf]
+   ├─ 1. FileFetcher.Fetch(url) — baixa server-side
+   ├─ 2. Validações: HTTPS, SSRF guard, MIME allowlist, tamanho ≤ 20MB
+   ├─ 3. data URI: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(bytes)
+   ├─ 4. Monta BulkDocument { ContentBase64: dataURI, Filename: derivado da URL }
+   └─ 5. POST /envelope_bulk_creations
+```
+
+#### Regras (resumo de `docs/PAYLOAD_ENVELOPE_DOCUMENT_FILE.md`)
+
+| Regra | Detalhe | Comportamento |
+|---|---|---|
+| **Formato** | `data:<mime>;base64,<bytes>` — data URI completo | Sem o prefixo `data:...;base64,` a API rejeita. |
+| **MIME allowlist** | `application/pdf`, `image/jpeg`, `image/png`, `text/plain`, `application/msword`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | Extensões aceitas: `.pdf`, `.jpg`, `.jpeg`, `.png`, `.txt`, `.doc`, `.docx`. |
+| **Tamanho** | Default 20 MB | Configurável via `FILE_FETCHER_MAX_BYTES`. Note que o base64 expande em ~33% (`20 MB → ~27 MB no JSON`). |
+| **HTTPS** | Obrigatório | Flag dev `FILE_FETCHER_ALLOW_HTTP=true` libera HTTP. |
+| **SSRF guard** | Bloqueia IPs privados (`10/8`, `172.16/12`, `192.168/16`, `127/8`, `169.254/16` AWS metadata, `::1`, `fc00::/7`, `fe80::/10`) | Checagem feita também em **redirects**. |
+| **filename opcional** | Quando omitido, derivado do basename da URL (decodifica `%20`, ignora query) | Se URL não tem basename útil (`/files/abc123`), erro pedindo filename explícito. |
+| **MIME detection** | Lê `Content-Type` da resposta; se `application/octet-stream` ou vazio, faz sniffing nos primeiros 512 bytes | Mitiga servidores mal configurados. |
+
+#### Custo de memória
+
+O arquivo inteiro fica em RAM durante o encode + envio. Picos:
+- Bytes originais: até 20 MB.
+- Bytes base64 em memória: ~27 MB.
+- Body JSON do request: ~27 MB de payload.
+
+Aceitável pro escopo. Se quisermos otimizar no futuro, vale considerar streaming com `base64.NewEncoder`, mas requer mudar o build do JSON body também.
+
+#### Erros frequentes que precisamos mapear pro usuário (humanizar no Flow)
+
+| Erro técnico | Mensagem natural no WhatsApp |
 |---|---|
-| Listar contas | `GET /api/v3/accounts` |
-| Listar templates | `GET /api/v3/templates?account_key={key}` |
-| Listar envelopes | `GET /api/v3/envelopes?account_key={key}` |
-| Detalhe de envelope | `GET /api/v3/envelopes/{id}` |
-| Criar envelope a partir de template | `POST /api/v3/envelopes/from_template` |
-| Criar envelope a partir de PDF | `POST /api/v3/envelopes` |
-| Adicionar signatário | `POST /api/v3/envelopes/{id}/signers` |
-| Cancelar envelope | `POST /api/v3/envelopes/{id}/cancel` |
+| `scheme nao e permitido` | "Só consigo baixar arquivos com URL **https://**. Pode me mandar de novo?" |
+| `SSRF bloqueado` (IP privado) | "Essa URL aponta pra um endereço interno e eu não consigo acessar. Tem um link público?" |
+| `extensao nao suportada` | "Aceito apenas PDF, JPG, PNG, TXT, DOC e DOCX. Pode me mandar nesse formato?" |
+| `excede o tamanho maximo` | "Esse arquivo passa do limite de 20 MB. Consegue reduzir ou compactar?" |
+| `tipo de arquivo nao e suportado` (MIME sniff falhou) | "Não consegui identificar o formato do arquivo. Pode confirmar que é um PDF/JPG/PNG válido?" |
+| Status HTTP != 200 ao baixar | "Não consegui baixar o arquivo dessa URL (ela voltou erro). Confere se o link continua acessível?" |
 
-> **Pendência**: validar os paths com a doc/Postman da API real.
+> **Atalho de implementação**: copiar `internal/clicksign/file_fetcher.go` do MCP server tal qual. São 239 LoC já testados, com SSRF guard completo. Junto, copiar a constante `allowedMimeTypes` e o `init()` que carrega os CIDRs privados.
 
-### 8.3 Reaproveitamento de OAuth
+### 8.8 Reaproveitamento de OAuth
 
 - `internal/oauth/client.go` já tem `RefreshToken`.
-- A função `refresh` aqui é praticamente cópia de `mcpclient.Manager.refresh`. Vale extrair para `internal/oauth` se ficar repetido.
+- A função `refresh` no novo cliente é praticamente idêntica a `mcpclient.Manager.refresh`. Vale extrair para `internal/oauth` (`oauth.RefreshAndStore(ctx, store, phone)`) — Fase 1.
 
 ---
 
@@ -651,44 +836,47 @@ Cada fase entrega valor mensurável e é mergeable. Feature flag `PIPELINE` em `
 - Adiciona `Session.PreferredAccount` e `Session.ActiveFlow` com deep-copy.
 - Build/testes: tudo continua passando em `legacy`.
 
-### Fase 1 — Primeiro fluxo (1 dia)
+### Fase 1 — Primeiro fluxo (0.5–1 dia)
 
-- `internal/clicksign/client.go` + `accounts.go` + `templates.go`.
+- **Portar** `internal/clicksign/types.go` e `client.go` do MCP `mcp-api-tavola-v3` (ver §8.6).
+- Adicionar `refresh` + métodos `ListAccounts`, `ListTemplates` (uns 30-40 LoC, o resto vem pronto).
 - `internal/flow/{flow.go, router.go, state.go, list_templates.go, select_account.go}`.
 - `internal/llm/nlu.go` + `prompts/nlu.md`.
-- Quando `PIPELINE=flow`, o `messages_handler.go` usa o pipeline novo só pros intents `list_templates` e `select_account`. Demais intents caem em `unknown` → mensagem de fallback ("estamos migrando...").
+- Quando `PIPELINE=flow`, `messages_handler.go` usa o pipeline novo só pros intents `list_templates` e `select_account`. Demais intents caem em `unknown` → mensagem de fallback ("estamos migrando...").
 
-**Critério**: usuário diz "liste meus templates" → recebe list message com contas, toca em uma, recebe list de templates. Latência < 3s.
+**Critério**: "liste meus templates" → list message com contas → escolhe → list de templates. Latência < 3s.
 
-### Fase 2 — Mais consultas (1 dia)
+### Fase 2 — Mais consultas (0.5–1 dia)
 
 - `internal/flow/{list_envelopes.go, envelope_status.go}`.
-- `clicksign/envelopes.go`.
+- Já reusa `GetEnvelopeDetails` e `ListEnvelopes` portados na Fase 1.
 
-**Critério**: "quais envelopes estou esperando?" e "status do envelope X" funcionam end-to-end.
+**Critério**: "quais envelopes estou esperando?" e "status do envelope X" funcionam.
 
-### Fase 3 — Criação de envelope (2 dias)
+### Fase 3 — Criação de envelope (1.5–2 dias)
 
-- `internal/flow/{create_envelope_tmpl.go, create_envelope_pdf.go}`.
+- `internal/flow/{create_envelope_tmpl.go, create_envelope_pdf.go}` usando `POST /envelope_bulk_creations` (§8.3).
 - Multi-step com confirm buttons.
-- `clicksign/signers.go`.
+- Portar `internal/clicksign/file_fetcher.go` (download + SSRF guard) e `validation.go` (regras de signer + glossário PT→EN de roles) do MCP.
 
 **Critério**: criar envelope a partir de template ou PDF, com signatários, com confirmação antes de enviar.
 
 ### Fase 4 — Ações destrutivas (0.5 dia)
 
-- `add_signer.go`, `cancel_envelope.go`.
+- `add_signer.go`, `cancel_envelope.go` (endpoint de cancel pendente — validar contra docs públicas antes).
 
-**Critério**: cancelar envelope com confirmação obrigatória.
+**Critério**: cancelar envelope com confirmação obrigatória; adicionar signer a envelope existente.
 
 ### Fase 5 — Polimento + remoção do legado (0.5 dia)
 
-- Mensagens de erro humanizadas por path.
-- Testes E2E.
-- Remove `internal/mcpclient` (ou mantém atrás de flag se queremos rollback rápido).
+- Mensagens de erro humanizadas por path (multi-account, validação de signer, etc.).
+- Testes E2E (Postman).
+- Remove `internal/mcpclient` (ou mantém atrás de flag para rollback rápido).
 - Atualiza `README.md`, `IMPLEMENTATION_PLAN.md`.
 
-### Total: 5-7 dias
+### Total revisado: 4–5 dias
+
+> O ganho vem do **reaproveitamento direto** do `mcp-api-tavola-v3`: types.go, client.go, file_fetcher.go e validation.go portam quase sem mudanças. A Fase 1 cai de 1 dia pra 0.5 dia, e a Fase 3 de 2 dias pra 1.5–2.
 
 ---
 
@@ -784,14 +972,18 @@ OPENAI_MAX_TOOL_ITERATIONS=...
 
 ## 16. Perguntas pro PO antes de codificar
 
-1. **n8n + WhatsApp Business API suportam `interactive` (list/buttons) no setup atual do hackathon?**
+> Perguntas resolvidas via leitura do código `clicksign/mcp-api-tavola-v3` estão marcadas com ✅. Restam as decisões de produto.
+
+1. **n8n + WhatsApp Business API suportam `interactive` (list/buttons) no setup atual do hackathon?** _(bloqueante pra Fase 1)_
 2. **Catálogo MVP de operações é exatamente os 8 listados na seção 7.5? Falta alguma?**
-3. **Doc oficial da API REST da Clicksign disponível?** (Validar paths exatos da seção 8.2.)
+3. ✅ ~~Doc oficial da API REST da Clicksign disponível? Validar paths exatos da seção 8.2.~~ — extraídos diretamente de `mcp-api-tavola-v3/internal/clicksign/client.go`. Pendente apenas o endpoint de **cancelar envelope**.
 4. **Mantemos a pipeline atual (Opção A) atrás de feature flag em produção, ou jogamos fora ao final?**
-5. **SLA de latência esperado:** < 2s? < 5s? (Determina se vale ir até Fase 3 ou se podemos parar antes.)
-6. **Tela final do envelope criado**: só confirma com texto? link clicável? mostra status atualizado? (Influencia design do `Done` final.)
+5. **SLA de latência esperado:** < 2s? < 5s? (Define se vale ir até Fase 3 ou parar antes.)
+6. **Tela final do envelope criado**: só confirma com texto? link clicável? mostra status atualizado? (Influencia design do `Done`.)
 7. **Multi-idioma**: pt-BR only ou inglês também? (NLU prompt teria de cobrir.)
 8. **Confirmação destrutiva (cancelar envelope, criar envelope) sempre obrigatória?** Recomendo sim.
+9. **Qual ambiente da API Clicksign vamos usar no demo** — `https://app.clicksign.com/api/v3` (prod) ou base equivalente de staging? (Definir `CLICKSIGN_API_BASE_URL`.)
+10. **`metadata.source` no envelope/document**: usamos `"whatsapp-bot"` ou um valor padronizado pelo time?
 
 ---
 
