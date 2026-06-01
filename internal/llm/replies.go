@@ -61,3 +61,25 @@ func InvalidInput() string {
 func InternalError() string {
 	return "Tive um problema interno. Tente de novo em alguns segundos, por favor."
 }
+
+func OffTopic() string {
+	return "Eu só ajudo com envelopes, documentos, templates e assinaturas da Clicksign. " +
+		"Em que posso ajudar nesse contexto?"
+}
+
+// Capabilities is the static reply for "meta_help" intents — saudações e
+// perguntas sobre o próprio assistente. Apresenta o bot e dá exemplos
+// concretos para reduzir atrito de onboarding sem queimar tokens do LLM
+// principal nem abrir conexão MCP.
+func Capabilities() string {
+	return "Oi! Eu te ajudo com Clicksign aqui pelo WhatsApp. Algumas coisas que posso fazer:\n" +
+		"• Listar os templates da sua conta\n" +
+		"• Criar envelopes a partir de um PDF\n" +
+		"• Adicionar signatários (nome, e-mail, papel)\n" +
+		"• Consultar o status de um envelope\n" +
+		"• Trocar de conta Clicksign quando você tem mais de uma\n\n" +
+		"Exemplos do que você pode mandar:\n" +
+		"• \"lista os templates\"\n" +
+		"• \"qual o status do envelope X?\"\n" +
+		"• \"envia esse PDF, nome do envelope Contrato 1, signatário Mikael, mikael@x.com, parte\""
+}

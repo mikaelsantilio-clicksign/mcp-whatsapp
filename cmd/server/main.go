@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/clicksign/whatsapp-mcp/internal/api"
+	"github.com/clicksign/whatsapp-mcp/internal/classifier"
 	"github.com/clicksign/whatsapp-mcp/internal/config"
 	"github.com/clicksign/whatsapp-mcp/internal/llm"
 	"github.com/clicksign/whatsapp-mcp/internal/logging"
@@ -53,7 +54,34 @@ func run() error {
 	}
 
 	mcpManager := mcpclient.NewManager(cfg, logger, store, oauthClient)
-	conversation := llm.NewConversation(cfg, logger, store, mcpManager)
+
+	var intentClassifier classifier.Classifier = classifier.AlwaysOnTopic{}
+	if cfg.ClassifierEnabled {
+		intentClassifier = classifier.NewOpenAI(logger, classifier.OpenAIConfig{
+			APIKey:   cfg.OpenAIAPIKey,
+			Model:    cfg.ClassifierModel,
+			Timeout:  cfg.ClassifierTimeout(),
+			CacheTTL: cfg.ClassifierCacheTTL(),
+		})
+		logger.Info("classifier_enabled",
+			slog.String("model", cfg.ClassifierModel),
+			slog.Int("context_turns", cfg.ClassifierContextTurns),
+		)
+	} else {
+		logger.Warn("classifier_disabled_all_messages_billed_to_main_llm")
+	}
+
+	var metaResponder *llm.MetaHelpResponder
+	if cfg.MetaHelpEnabled {
+		metaResponder = llm.NewMetaHelpResponder(cfg, logger, mcpManager)
+		logger.Info("meta_help_enabled",
+			slog.String("model", cfg.MetaHelpModel),
+		)
+	} else {
+		logger.Info("meta_help_disabled_using_static_capabilities")
+	}
+
+	conversation := llm.NewConversation(cfg, logger, store, mcpManager, intentClassifier, metaResponder)
 	notifier := n8n.NewNotifier(logger, cfg.N8NWebhookURL, cfg.N8NWebhookToken)
 
 	messages := api.NewMessagesHandler(cfg, logger, store, oauthClient, signer, conversation)

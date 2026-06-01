@@ -3,6 +3,7 @@ package llm
 import (
 	"github.com/openai/openai-go"
 
+	"github.com/clicksign/whatsapp-mcp/internal/classifier"
 	"github.com/clicksign/whatsapp-mcp/internal/session"
 )
 
@@ -70,6 +71,30 @@ func alignToUser(turns []session.ChatTurn) []session.ChatTurn {
 		}
 	}
 	return nil
+}
+
+// classifierContext picks the last N user/assistant turns from the history
+// to be sent as context to the intent classifier. Tool messages are skipped
+// (noise for intent classification) and assistant turns that produced only
+// tool_calls (no text) are skipped too. The result is in chronological
+// order (oldest first), capped at maxTurns.
+func classifierContext(turns []session.ChatTurn, maxTurns int) []classifier.HistoryTurn {
+	if maxTurns <= 0 || len(turns) == 0 {
+		return nil
+	}
+	out := make([]classifier.HistoryTurn, 0, maxTurns)
+	// Walk from the end backwards collecting eligible turns.
+	for i := len(turns) - 1; i >= 0 && len(out) < maxTurns; i-- {
+		t := turns[i]
+		if t.Role != "user" && t.Role != "assistant" {
+			continue
+		}
+		if t.Content == "" {
+			continue
+		}
+		out = append([]classifier.HistoryTurn{{Role: t.Role, Content: t.Content}}, out...)
+	}
+	return out
 }
 
 // extractToolCalls converts an OpenAI assistant tool_calls slice into our

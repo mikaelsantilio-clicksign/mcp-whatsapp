@@ -12,6 +12,7 @@ import (
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/shared"
 
+	"github.com/clicksign/whatsapp-mcp/internal/classifier"
 	"github.com/clicksign/whatsapp-mcp/internal/config"
 	"github.com/clicksign/whatsapp-mcp/internal/conv"
 	"github.com/clicksign/whatsapp-mcp/internal/logging"
@@ -22,23 +23,38 @@ import (
 // Conversation implements conv.Conversation by orchestrating an OpenAI chat
 // completion loop that can call tools from a remote MCP server. It also
 // persists the per-user message history in the session store so subsequent
-// requests have context of prior turns.
+// requests have context of prior turns, and gates incoming messages through
+// a cheap intent classifier before invoking the main loop.
 type Conversation struct {
-	cfg    *config.Config
-	logger *slog.Logger
-	store  session.Store
-	mgr    *mcpclient.Manager
-	oai    openai.Client
+	cfg        *config.Config
+	logger     *slog.Logger
+	store      session.Store
+	mgr        *mcpclient.Manager
+	oai        openai.Client
+	classifier classifier.Classifier
+	metaHelp   *MetaHelpResponder // optional; nil → fall back to static Capabilities()
 }
 
-func NewConversation(cfg *config.Config, logger *slog.Logger, store session.Store, mgr *mcpclient.Manager) *Conversation {
+func NewConversation(
+	cfg *config.Config,
+	logger *slog.Logger,
+	store session.Store,
+	mgr *mcpclient.Manager,
+	cls classifier.Classifier,
+	meta *MetaHelpResponder,
+) *Conversation {
 	cli := openai.NewClient(option.WithAPIKey(cfg.OpenAIAPIKey))
+	if cls == nil {
+		cls = classifier.AlwaysOnTopic{}
+	}
 	return &Conversation{
-		cfg:    cfg,
-		logger: logger,
-		store:  store,
-		mgr:    mgr,
-		oai:    cli,
+		cfg:        cfg,
+		logger:     logger,
+		store:      store,
+		mgr:        mgr,
+		oai:        cli,
+		classifier: cls,
+		metaHelp:   meta,
 	}
 }
 
@@ -47,6 +63,63 @@ func NewConversation(cfg *config.Config, logger *slog.Logger, store session.Stor
 // OpenAI.
 func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, error) {
 	phoneHash := logging.HashPhone(in.Phone)
+
+	// Load prior history (if any). We need it both for classifier context
+	// (to disambiguate short replies like "sim"/"use a conta 3") and to
+	// rehydrate the OpenAI message array later.
+	var priorHistory []session.ChatTurn
+	if sess, err := c.store.GetSession(ctx, in.Phone); err == nil {
+		priorHistory = sess.History
+	}
+
+	// Intent gate: cheap classifier in front of the main loop. Three
+	// outcomes:
+	//   - on_topic  → proceed to MCP + main LLM (default path)
+	//   - meta_help → static Capabilities() reply, no MCP, no LLM
+	//   - off_topic → static OffTopic() reply, no MCP, no LLM
+	// Meta_help and off_topic exchanges are NOT persisted to history,
+	// so the next legitimate message starts from a clean slate.
+	recent := classifierContext(priorHistory, c.cfg.ClassifierContextTurns)
+	verdict, vErr := c.classifier.Classify(ctx, in.Message, recent)
+	if vErr != nil {
+		// Fail open: a broken classifier should NOT block legitimate users.
+		c.logger.Warn("classifier_failed_fail_open",
+			slog.String("phone_hash", phoneHash),
+			slog.String("err", vErr.Error()),
+		)
+	} else {
+		switch verdict.Intent {
+		case classifier.IntentMetaHelp:
+			c.logger.Info("message_meta_help",
+				slog.String("phone_hash", phoneHash),
+				slog.String("reason", verdict.Reason),
+			)
+			if c.metaHelp != nil {
+				if reply, err := c.metaHelp.Respond(ctx, in.Phone, in.Message, recent); err == nil {
+					return conv.Output{Reply: reply}, nil
+				} else {
+					// LLM-backed reply failed — log and fall through to the
+					// static template so the user always gets something useful.
+					c.logger.Warn("meta_help_failed_static_fallback",
+						slog.String("phone_hash", phoneHash),
+						slog.String("err", err.Error()),
+					)
+				}
+			}
+			return conv.Output{Reply: Capabilities()}, nil
+		case classifier.IntentOffTopic:
+			c.logger.Info("message_off_topic",
+				slog.String("phone_hash", phoneHash),
+				slog.String("reason", verdict.Reason),
+			)
+			return conv.Output{Reply: OffTopic()}, nil
+		default:
+			c.logger.Debug("message_on_topic",
+				slog.String("phone_hash", phoneHash),
+				slog.String("reason", verdict.Reason),
+			)
+		}
+	}
 
 	conn, err := c.mgr.Open(ctx, in.Phone)
 	if err != nil {
@@ -80,14 +153,8 @@ func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, err
 		})
 	}
 
-	// Load prior history (if any) and rehydrate the OpenAI message array.
-	// Errors loading history are non-fatal: we still serve the request, just
-	// without prior context.
-	var priorHistory []session.ChatTurn
-	if sess, err := c.store.GetSession(ctx, in.Phone); err == nil {
-		priorHistory = sess.History
-	}
-
+	// priorHistory was loaded above for the classifier; reuse it now to
+	// rehydrate the OpenAI message array.
 	messages := []openai.ChatCompletionMessageParamUnion{
 		openai.SystemMessage(SystemPrompt()),
 	}

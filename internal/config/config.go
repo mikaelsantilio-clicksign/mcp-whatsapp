@@ -35,6 +35,18 @@ type Config struct {
 	OpenAIMaxToolIterations  int    `mapstructure:"openai_max_tool_iterations"`
 	OpenAITimeoutSeconds     int    `mapstructure:"openai_timeout_seconds"`
 
+	// Classifier (intent gate before main LLM)
+	ClassifierEnabled        bool   `mapstructure:"classifier_enabled"`
+	ClassifierModel          string `mapstructure:"classifier_model"`
+	ClassifierTimeoutSeconds int    `mapstructure:"classifier_timeout_seconds"`
+	ClassifierCacheTTLSeconds int   `mapstructure:"classifier_cache_ttl_seconds"`
+	ClassifierContextTurns   int    `mapstructure:"classifier_context_turns"`
+
+	// MetaHelp responder (cheap LLM for greetings / capability questions)
+	MetaHelpEnabled        bool   `mapstructure:"meta_help_enabled"`
+	MetaHelpModel          string `mapstructure:"meta_help_model"`
+	MetaHelpTimeoutSeconds int    `mapstructure:"meta_help_timeout_seconds"`
+
 	// n8n callback
 	N8NWebhookURL   string `mapstructure:"n8n_webhook_url"`
 	N8NWebhookToken string `mapstructure:"n8n_webhook_token"`
@@ -62,6 +74,18 @@ func (c *Config) OpenAITimeout() time.Duration {
 	return time.Duration(c.OpenAITimeoutSeconds) * time.Second
 }
 
+func (c *Config) ClassifierTimeout() time.Duration {
+	return time.Duration(c.ClassifierTimeoutSeconds) * time.Second
+}
+
+func (c *Config) ClassifierCacheTTL() time.Duration {
+	return time.Duration(c.ClassifierCacheTTLSeconds) * time.Second
+}
+
+func (c *Config) MetaHelpTimeout() time.Duration {
+	return time.Duration(c.MetaHelpTimeoutSeconds) * time.Second
+}
+
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
@@ -79,6 +103,14 @@ func Load() (*Config, error) {
 	v.SetDefault("openai_model", "gpt-4o-mini")
 	v.SetDefault("openai_max_tool_iterations", 8)
 	v.SetDefault("openai_timeout_seconds", 60)
+	v.SetDefault("classifier_enabled", true)
+	v.SetDefault("classifier_model", "gpt-4o-mini")
+	v.SetDefault("classifier_timeout_seconds", 10)
+	v.SetDefault("classifier_cache_ttl_seconds", 60)
+	v.SetDefault("classifier_context_turns", 4)
+	v.SetDefault("meta_help_enabled", true)
+	v.SetDefault("meta_help_model", "gpt-4o-mini")
+	v.SetDefault("meta_help_timeout_seconds", 10)
 	v.SetDefault("session_backend", "memory")
 	v.SetDefault("dynamodb_table_name", "whatsapp_mcp_sessions")
 	v.SetDefault("aws_region", "us-east-1")
@@ -89,6 +121,8 @@ func Load() (*Config, error) {
 		"mcp_server_base_url", "mcp_endpoint_path", "mcp_oauth_scopes",
 		"oauth_redirect_path", "state_hmac_secret", "pkce_ttl_seconds",
 		"openai_api_key", "openai_model", "openai_max_tool_iterations", "openai_timeout_seconds",
+		"classifier_enabled", "classifier_model", "classifier_timeout_seconds", "classifier_cache_ttl_seconds", "classifier_context_turns",
+		"meta_help_enabled", "meta_help_model", "meta_help_timeout_seconds",
 		"n8n_webhook_url", "n8n_webhook_token",
 		"session_backend", "dynamodb_table_name", "dynamodb_endpoint", "aws_region",
 	} {

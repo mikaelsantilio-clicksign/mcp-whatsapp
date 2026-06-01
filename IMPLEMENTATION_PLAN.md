@@ -507,6 +507,22 @@ LOG_LEVEL=info
 - [ ] README com instruções de uso
 - [ ] (opcional) Terraform mínimo
 
+### Fase 8 — Intent gate / classifier híbrido (concluída)
+
+Adiciona um classificador binário on-topic/off-topic na frente do loop principal para limitar custo e abuso (matemática, conselhos médicos, jailbreaks). Adota a **opção 4a**: passa as últimas N turns user/assistant como contexto, permitindo classificar corretamente respostas curtas (“sim”, “use a conta 3”, dados do signatário) que isoladamente seriam ambíguas.
+
+- [x] `internal/classifier`: `Classifier` interface + `Verdict`/`HistoryTurn` + `AlwaysOnTopic` fallback.
+- [x] `internal/classifier/openai.go`: chama Chat Completions com `response_format: json_object`, `temperature=0`, modelo barato (`gpt-4o-mini` por padrão), `max_completion_tokens=80`, prompt minimalista em pt-BR.
+- [x] `internal/classifier/cache.go`: cache TTL keyed por `sha256(message + recent context)` para evitar pagar verdicts repetidos em rajadas.
+- [x] `internal/llm/replies.go`: `OffTopic()` — recusa cordial pt-BR.
+- [x] `internal/llm/history.go` (`classifierContext`): seleciona até `CLASSIFIER_CONTEXT_TURNS` (default 4) turns user/assistant, filtra `tool` e mensagens vazias.
+- [x] `internal/llm/openai.go` (`Conversation.Run`): carrega histórico **antes** de abrir conexão MCP, chama o classifier; em off-topic retorna `OffTopic()` sem abrir MCP, sem chamar o LLM principal, sem persistir o turn (estado limpo); em erro → fail-open com `Warn`.
+- [x] `internal/config`: `CLASSIFIER_ENABLED`, `CLASSIFIER_MODEL`, `CLASSIFIER_TIMEOUT_SECONDS`, `CLASSIFIER_CACHE_TTL_SECONDS`, `CLASSIFIER_CONTEXT_TURNS`.
+- [x] `cmd/server/main.go`: wiring com `AlwaysOnTopic{}` quando desabilitado; log de boot indicando estado.
+- [x] testes unitários: parse de verdict (incluindo fences markdown), montagem do user content com/sem contexto, estabilidade do fingerprint, `classifierContext` filtrando tool/empty e respeitando cap.
+
+**Critério**: usuário autenticado envia “quanto é 2+2?” → resposta `OffTopic()` sem chamar MCP nem rodar o loop de tools; usuário envia “use a conta 3” após o assistente listar contas → classifier vê o contexto e marca on-topic.
+
 ---
 
 ## 9. Loop OpenAI ↔ MCP (pseudo-código)

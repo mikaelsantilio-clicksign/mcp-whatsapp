@@ -153,6 +153,19 @@ func (c *Conn) Close() error {
 	return c.c.Close()
 }
 
+// ListToolsCached returns the cached tools list if it is fresh, or nil if
+// the cache is cold. Unlike ListTools, it does NOT touch the network — it's
+// meant for flows (like meta_help replies) where opening an MCP connection
+// solely to populate the cache would be wasteful.
+func (m *Manager) ListToolsCached() []mcp.Tool {
+	m.toolsMu.RLock()
+	defer m.toolsMu.RUnlock()
+	if time.Now().Before(m.toolsExpiry) && len(m.toolsCache) > 0 {
+		return append([]mcp.Tool(nil), m.toolsCache...)
+	}
+	return nil
+}
+
 // ListTools returns the cached list (refreshing it on TTL miss) using this
 // connection's credentials. The tools surface is server-global so any
 // authenticated session can populate the cache.
