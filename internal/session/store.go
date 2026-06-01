@@ -18,8 +18,28 @@ type Session struct {
 	RefreshToken string     `json:"refresh_token"`
 	ExpiresAt    time.Time  `json:"expires_at"`
 	AccountKey   string     `json:"account_key,omitempty"`
-	History      []ChatTurn `json:"history,omitempty"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// PreferredAccount is the Clicksign multi-account key chosen by the user
+	// in a previous turn. Used by the Option B "flow" pipeline as the
+	// X-Account-Key header on every authenticated request. Empty when the
+	// user has a single account or has not chosen yet.
+	PreferredAccount string `json:"preferred_account,omitempty"`
+	// ActiveFlow tracks an in-progress multi-turn flow (e.g. list templates
+	// waiting for an account choice, create envelope waiting for confirm).
+	// Used only by the "flow" pipeline; nil for the legacy pipeline.
+	ActiveFlow *FlowState `json:"active_flow,omitempty"`
+	History    []ChatTurn `json:"history,omitempty"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+}
+
+// FlowState is a persisted snapshot of an in-progress flow so the next inbound
+// turn (typically an interactive_reply click) can resume from where it stopped.
+// Data carries arbitrary per-flow scratch state (entities extracted, doc bytes
+// after download, partial signer list, etc.).
+type FlowState struct {
+	FlowID  string         `json:"flow_id"`
+	Step    string         `json:"step"`
+	AskedAt time.Time      `json:"asked_at"`
+	Data    map[string]any `json:"data,omitempty"`
 }
 
 // ChatTurn is one persisted message in the conversation history with the

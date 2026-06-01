@@ -12,6 +12,7 @@ import (
 
 	"github.com/clicksign/whatsapp-mcp/internal/config"
 	"github.com/clicksign/whatsapp-mcp/internal/conv"
+	"github.com/clicksign/whatsapp-mcp/internal/flow"
 	"github.com/clicksign/whatsapp-mcp/internal/llm"
 	"github.com/clicksign/whatsapp-mcp/internal/logging"
 	"github.com/clicksign/whatsapp-mcp/internal/oauth"
@@ -25,6 +26,9 @@ type MessagesHandler struct {
 	oauth        *oauth.Client
 	signer       *oauth.StateSigner
 	conversation conv.Conversation
+	// flowPipeline is set when cfg.PipelineFlow() returns true. When nil,
+	// the handler falls back to the legacy conversation pipeline.
+	flowPipeline *FlowPipeline
 	idempotency  *idempotencyCache
 }
 
@@ -35,6 +39,7 @@ func NewMessagesHandler(
 	oauthClient *oauth.Client,
 	signer *oauth.StateSigner,
 	conversation conv.Conversation,
+	flowPipeline *FlowPipeline,
 ) *MessagesHandler {
 	return &MessagesHandler{
 		cfg:          cfg,
@@ -43,6 +48,7 @@ func NewMessagesHandler(
 		oauth:        oauthClient,
 		signer:       signer,
 		conversation: conversation,
+		flowPipeline: flowPipeline,
 		idempotency:  newIdempotencyCache(60 * time.Second),
 	}
 }
@@ -53,12 +59,16 @@ type Attachment struct {
 	Filename string `json:"filename,omitempty"`
 }
 
+// MessageRequest is the inbound payload from n8n. Either Message or
+// InteractiveReply must be present (a clique-only turn omits Message).
+// See docs/N8N_INTEGRATION_CONTRACT.md for full details.
 type MessageRequest struct {
-	PhoneNumber    string       `json:"phone_number"`
-	Message        string       `json:"message"`
-	Attachments    []Attachment `json:"attachments,omitempty"`
-	ConversationID string       `json:"conversation_id,omitempty"`
-	MessageID      string       `json:"message_id,omitempty"`
+	PhoneNumber      string                 `json:"phone_number"`
+	Message          string                 `json:"message,omitempty"`
+	InteractiveReply *flow.InteractiveReply `json:"interactive_reply,omitempty"`
+	Attachments      []Attachment           `json:"attachments,omitempty"`
+	ConversationID   string                 `json:"conversation_id,omitempty"`
+	MessageID        string                 `json:"message_id,omitempty"`
 }
 
 func (h *MessagesHandler) Post(w http.ResponseWriter, r *http.Request) {
@@ -73,12 +83,23 @@ func (h *MessagesHandler) Post(w http.ResponseWriter, r *http.Request) {
 	}
 	req.PhoneNumber = strings.TrimSpace(req.PhoneNumber)
 	req.Message = strings.TrimSpace(req.Message)
+	hasInteractive := req.InteractiveReply != nil &&
+		(strings.TrimSpace(req.InteractiveReply.ListItemID) != "" ||
+			strings.TrimSpace(req.InteractiveReply.ButtonID) != "")
 
-	if req.PhoneNumber == "" || req.Message == "" {
+	if req.PhoneNumber == "" {
 		writeJSON(w, http.StatusBadRequest, MessageResponse{
 			Status: "error",
 			Reply:  llm.InvalidInput(),
-			Error:  &errorBody{Code: "INVALID_INPUT", Details: "phone_number and message are required"},
+			Error:  &errorBody{Code: "INVALID_INPUT", Details: "phone_number is required"},
+		})
+		return
+	}
+	if req.Message == "" && !hasInteractive {
+		writeJSON(w, http.StatusBadRequest, MessageResponse{
+			Status: "error",
+			Reply:  llm.InvalidInput(),
+			Error:  &errorBody{Code: "INVALID_INPUT", Details: "message or interactive_reply is required"},
 		})
 		return
 	}
@@ -119,7 +140,15 @@ func (h *MessagesHandler) Post(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Session exists; defer to the conversation pipeline.
+	// Pipeline switch (Option B). When PIPELINE=flow we delegate to the
+	// NLU + Guided Flow pipeline; otherwise we keep the legacy MCP +
+	// LLM tool-calling path live so the migration is reversible.
+	if h.cfg.PipelineFlow() && h.flowPipeline != nil {
+		h.runFlowPipeline(ctx, w, req, sess, phoneHash)
+		return
+	}
+
+	// Legacy path.
 	if h.conversation == nil {
 		writeJSON(w, http.StatusOK, MessageResponse{
 			Status: "ok",
@@ -159,6 +188,35 @@ func (h *MessagesHandler) Post(w http.ResponseWriter, r *http.Request) {
 		Reply:     out.Reply,
 		ToolCalls: traces,
 	})
+}
+
+// runFlowPipeline invokes the Option B pipeline (NLU + Guided Flow) and
+// writes the resulting MessageResponse.
+func (h *MessagesHandler) runFlowPipeline(
+	ctx context.Context,
+	w http.ResponseWriter,
+	req MessageRequest,
+	sess *session.Session,
+	phoneHash string,
+) {
+	resp, err := h.flowPipeline.Run(ctx, req, sess)
+	if err != nil {
+		if errors.Is(err, conv.ErrSessionExpired) {
+			h.respondNeedsAuth(ctx, w, req.PhoneNumber, llm.SessionExpired)
+			return
+		}
+		h.logger.Error("flow_pipeline_failed",
+			slog.String("err", err.Error()),
+			slog.String("phone_hash", phoneHash),
+		)
+		writeJSON(w, http.StatusOK, MessageResponse{
+			Status: "error",
+			Reply:  llm.InternalError(),
+			Error:  &errorBody{Code: "INTERNAL_ERROR", Details: err.Error()},
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func convertAttachments(in []Attachment) []conv.Attachment {

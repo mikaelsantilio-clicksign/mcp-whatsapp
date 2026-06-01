@@ -56,6 +56,18 @@ type Config struct {
 	DynamoDBTableName  string `mapstructure:"dynamodb_table_name"`
 	DynamoDBEndpoint   string `mapstructure:"dynamodb_endpoint"`
 	AWSRegion          string `mapstructure:"aws_region"`
+
+	// Pipeline switch: "legacy" (MCP+LLM tool-calling) or "flow" (NLU + Guided Flow).
+	// During the Option B migration both paths coexist behind this flag.
+	Pipeline string `mapstructure:"pipeline"`
+
+	// Clicksign REST API (Option B)
+	ClicksignAPIBaseURL        string `mapstructure:"clicksign_api_base_url"`
+	ClicksignAPITimeoutSeconds int    `mapstructure:"clicksign_api_timeout_seconds"`
+
+	// NLU LLM (Option B) — extracts intent + entities from user messages
+	NLUModel          string `mapstructure:"nlu_model"`
+	NLUTimeoutSeconds int    `mapstructure:"nlu_timeout_seconds"`
 }
 
 func (c *Config) RedirectURI() string {
@@ -86,6 +98,21 @@ func (c *Config) MetaHelpTimeout() time.Duration {
 	return time.Duration(c.MetaHelpTimeoutSeconds) * time.Second
 }
 
+func (c *Config) ClicksignAPITimeout() time.Duration {
+	return time.Duration(c.ClicksignAPITimeoutSeconds) * time.Second
+}
+
+func (c *Config) NLUTimeout() time.Duration {
+	return time.Duration(c.NLUTimeoutSeconds) * time.Second
+}
+
+// PipelineFlow reports whether the new NLU + Guided Flow pipeline is active.
+// Defaults to false ("legacy") so the existing MCP+LLM tool-calling path stays
+// in charge until the flag is explicitly flipped to "flow".
+func (c *Config) PipelineFlow() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Pipeline), "flow")
+}
+
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
@@ -114,6 +141,11 @@ func Load() (*Config, error) {
 	v.SetDefault("session_backend", "memory")
 	v.SetDefault("dynamodb_table_name", "whatsapp_mcp_sessions")
 	v.SetDefault("aws_region", "us-east-1")
+	v.SetDefault("pipeline", "legacy")
+	v.SetDefault("clicksign_api_base_url", "https://app.clicksign.com/api/v3")
+	v.SetDefault("clicksign_api_timeout_seconds", 20)
+	v.SetDefault("nlu_model", "gpt-4o-mini")
+	v.SetDefault("nlu_timeout_seconds", 15)
 
 	for _, key := range []string{
 		"port", "log_level",
@@ -125,6 +157,9 @@ func Load() (*Config, error) {
 		"meta_help_enabled", "meta_help_model", "meta_help_timeout_seconds",
 		"n8n_webhook_url", "n8n_webhook_token",
 		"session_backend", "dynamodb_table_name", "dynamodb_endpoint", "aws_region",
+		"pipeline",
+		"clicksign_api_base_url", "clicksign_api_timeout_seconds",
+		"nlu_model", "nlu_timeout_seconds",
 	} {
 		_ = v.BindEnv(key, strings.ToUpper(key))
 	}

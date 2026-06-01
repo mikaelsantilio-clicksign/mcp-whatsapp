@@ -16,11 +16,14 @@ import (
 
 	"github.com/clicksign/whatsapp-mcp/internal/api"
 	"github.com/clicksign/whatsapp-mcp/internal/classifier"
+	"github.com/clicksign/whatsapp-mcp/internal/clicksign"
 	"github.com/clicksign/whatsapp-mcp/internal/config"
+	"github.com/clicksign/whatsapp-mcp/internal/flow"
 	"github.com/clicksign/whatsapp-mcp/internal/llm"
 	"github.com/clicksign/whatsapp-mcp/internal/logging"
 	"github.com/clicksign/whatsapp-mcp/internal/mcpclient"
 	"github.com/clicksign/whatsapp-mcp/internal/n8n"
+	"github.com/clicksign/whatsapp-mcp/internal/nlu"
 	"github.com/clicksign/whatsapp-mcp/internal/oauth"
 	"github.com/clicksign/whatsapp-mcp/internal/session"
 )
@@ -84,7 +87,17 @@ func run() error {
 	conversation := llm.NewConversation(cfg, logger, store, mcpManager, intentClassifier, metaResponder)
 	notifier := n8n.NewNotifier(logger, cfg.N8NWebhookURL, cfg.N8NWebhookToken)
 
-	messages := api.NewMessagesHandler(cfg, logger, store, oauthClient, signer, conversation)
+	// Option B pipeline wiring. Built unconditionally so we can flip the
+	// PIPELINE flag at runtime without rebuilding; the messages_handler
+	// uses cfg.PipelineFlow() to choose between legacy and flow.
+	flowPipeline := buildFlowPipeline(cfg, logger, store, oauthClient, intentClassifier)
+	logger.Info("flow_pipeline_built",
+		slog.Bool("active", cfg.PipelineFlow()),
+		slog.String("clicksign_base_url", cfg.ClicksignAPIBaseURL),
+		slog.String("nlu_model", cfg.NLUModel),
+	)
+
+	messages := api.NewMessagesHandler(cfg, logger, store, oauthClient, signer, conversation, flowPipeline)
 	oauthHandler := api.NewOAuthHandler(cfg, logger, store, oauthClient, signer, notifier)
 	health := api.NewHealthHandler(cfg)
 
@@ -189,4 +202,36 @@ func prefix(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// buildFlowPipeline wires the NLU + Guided Flow pipeline (Option B). Built
+// even when PIPELINE=legacy so flipping the flag is a no-restart change;
+// when an OpenAI key is absent the NLU degrades to a Static extractor that
+// always returns intent=unknown (the router then falls back gracefully).
+func buildFlowPipeline(
+	cfg *config.Config,
+	logger *slog.Logger,
+	store session.Store,
+	oauthClient *oauth.Client,
+	intentClassifier classifier.Classifier,
+) *api.FlowPipeline {
+	cs := clicksign.NewClient(clicksign.Config{
+		BaseURL: cfg.ClicksignAPIBaseURL,
+		Timeout: cfg.ClicksignAPITimeout(),
+	}, logger, store, oauthClient)
+
+	var nluExt nlu.Extractor = nlu.Static{V: nlu.Verdict{Intent: nlu.IntentUnknown, Confidence: nlu.ConfLow}}
+	if cfg.OpenAIAPIKey != "" {
+		nluExt = nlu.NewOpenAI(logger, nlu.OpenAIConfig{
+			APIKey:  cfg.OpenAIAPIKey,
+			Model:   cfg.NLUModel,
+			Timeout: cfg.NLUTimeout(),
+		})
+	}
+
+	router := flow.NewRouter(logger,
+		flow.NewSelectAccountFlow(cs),
+		flow.NewListTemplatesFlow(cs),
+	)
+	return api.NewFlowPipeline(cfg, logger, store, intentClassifier, nluExt, router)
 }

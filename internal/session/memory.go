@@ -50,9 +50,9 @@ func (m *MemoryStore) PutSession(_ context.Context, s *Session) error {
 	return nil
 }
 
-// copySession deep-copies a Session including the History slice and the
-// nested ToolCalls slices so callers can mutate the returned value without
-// affecting the stored record.
+// copySession deep-copies a Session including the History slice, nested
+// ToolCalls and the ActiveFlow.Data map so callers can mutate the returned
+// value without affecting the stored record.
 func copySession(s *Session) *Session {
 	if s == nil {
 		return nil
@@ -66,7 +66,24 @@ func copySession(s *Session) *Session {
 	} else {
 		cp.History = nil
 	}
+	cp.ActiveFlow = copyFlowState(s.ActiveFlow)
 	return &cp
+}
+
+func copyFlowState(f *FlowState) *FlowState {
+	if f == nil {
+		return nil
+	}
+	out := *f
+	if len(f.Data) > 0 {
+		out.Data = make(map[string]any, len(f.Data))
+		for k, v := range f.Data {
+			out.Data[k] = v
+		}
+	} else {
+		out.Data = nil
+	}
+	return &out
 }
 
 func copyChatTurn(t ChatTurn) ChatTurn {

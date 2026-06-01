@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+
+	"github.com/clicksign/whatsapp-mcp/internal/flow"
 )
 
 func contextWithRequestID(ctx context.Context, id string) context.Context {
@@ -27,14 +29,26 @@ type errorBody struct {
 }
 
 // MessageResponse is the unified response shape of POST /api/messages.
+//
+// The Option B pipeline introduces three new optional fields: Interactive
+// (list/buttons payload), FlowState (digest of the active multi-turn flow)
+// and Trace (per-step diagnostic info). Legacy ToolCalls remains for
+// backwards compatibility while the migration runs. The wire-level structs
+// (InteractivePayload, FlowStateDigest, TraceStep, InteractiveReply) live
+// in internal/flow so a Flow can populate a Result that gets serialised
+// straight into the HTTP response.
 type MessageResponse struct {
-	Status       string          `json:"status"`
-	Reply        string          `json:"reply"`
-	AuthorizeURL string          `json:"authorize_url,omitempty"`
-	ToolCalls    []ToolCallTrace `json:"tool_calls,omitempty"`
-	Error        *errorBody      `json:"error,omitempty"`
+	Status       string                   `json:"status"`
+	Reply        string                   `json:"reply"`
+	AuthorizeURL string                   `json:"authorize_url,omitempty"`
+	Interactive  *flow.InteractivePayload `json:"interactive,omitempty"`
+	FlowState    *flow.FlowStateDigest    `json:"flow_state,omitempty"`
+	Trace        []flow.TraceStep         `json:"trace,omitempty"`
+	ToolCalls    []ToolCallTrace          `json:"tool_calls,omitempty"`
+	Error        *errorBody               `json:"error,omitempty"`
 }
 
+// ToolCallTrace is the legacy diagnostic shape kept for the MCP pipeline.
 type ToolCallTrace struct {
 	Name string `json:"name"`
 	OK   bool   `json:"ok"`
