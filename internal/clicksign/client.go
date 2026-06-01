@@ -137,8 +137,20 @@ func (c *Client) do(ctx context.Context, phone, method, path, contentType string
 			return nil, 0, err
 		}
 	}
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+	if status == http.StatusUnauthorized {
 		return resp, status, ErrInvalidToken
+	}
+	// 403 has two distinct meanings on Clicksign:
+	//   - "your token is invalid / your client has no access" → treat as
+	//     ErrInvalidToken so flows know to re-auth.
+	//   - business rule violation (e.g. "envelope n\u00e3o est\u00e1 com status draft"
+	//     on DELETE /envelopes/{id}) → surface as a normal APIError so the
+	//     flow can render a friendly explanation.
+	if status == http.StatusForbidden {
+		if looksLikeAuthError(resp) {
+			return resp, status, ErrInvalidToken
+		}
+		return resp, status, &APIError{Status: status, Endpoint: endpoint, Body: resp}
 	}
 	if status >= http.StatusInternalServerError {
 		return resp, status, fmt.Errorf("%w: status %d body=%s", ErrServiceUnavailable, status, truncate(string(resp), 256))
@@ -196,6 +208,28 @@ func (c *Client) doOnce(ctx context.Context, phone, method, path, contentType st
 		slog.Int("status", resp.StatusCode),
 	)
 	return raw, resp.StatusCode, nil
+}
+
+// looksLikeAuthError tries to disambiguate a 403 caused by token/scope
+// issues from a 403 raised by a business rule (e.g. DELETE /envelopes/{id}
+// returning "envelope n\u00e3o est\u00e1 com status draft"). We treat the
+// response as an auth failure when the body is empty, mentions
+// "unauthorized" / "invalid_token", or has no body at all. Any other
+// 403 is surfaced as a normal APIError so the calling flow can render
+// the business message verbatim.
+func looksLikeAuthError(body []byte) bool {
+	s := strings.ToLower(strings.TrimSpace(string(body)))
+	if s == "" {
+		return true
+	}
+	if strings.Contains(s, "invalid_token") || strings.Contains(s, "unauthorized") {
+		return true
+	}
+	// Cognito-style "token has expired" / WWW-Authenticate-like hints.
+	if strings.Contains(s, "token has expired") || strings.Contains(s, "expired token") {
+		return true
+	}
+	return false
 }
 
 // isMultiAccountErr matches the Portuguese-language hint Clicksign returns
@@ -454,6 +488,101 @@ func (c *Client) CreateEnvelopeBulk(ctx context.Context, phone string, req Envel
 		return nil, fmt.Errorf("clicksign: decode bulk creation: %w", err)
 	}
 	return &resp, nil
+}
+
+// AddSignerInput captures the user-facing fields supported by the
+// "criar signatário" endpoint (POST /envelopes/{id}/signers, JSON:API).
+// Only Name and Email are required; the others map 1:1 to the
+// documented attributes.
+//
+// See https://developers.clicksign.com/reference/api-criar-signatario
+type AddSignerInput struct {
+	Name             string `json:"name"`
+	Email            string `json:"email,omitempty"`
+	PhoneNumber      string `json:"phone_number,omitempty"`
+	Documentation    string `json:"documentation,omitempty"`
+	Birthday         string `json:"birthday,omitempty"`
+	HasDocumentation *bool  `json:"has_documentation,omitempty"`
+	Refusable        *bool  `json:"refusable,omitempty"`
+	Group            int    `json:"group,omitempty"`
+}
+
+// AddSignerResult is the projection of the JSON:API response we surface
+// to flows. The full payload is preserved in Raw for debugging.
+type AddSignerResult struct {
+	ID    string
+	Email string
+	Name  string
+	Raw   json.RawMessage
+}
+
+// AddSigner adds a signer to an existing envelope. The endpoint uses the
+// JSON:API content type, even though the request schema (in
+// developers.clicksign.com) shows a plain JSON body — we follow the same
+// convention the Clicksign MCP server uses for envelope-scoped writes
+// (application/vnd.api+json).
+func (c *Client) AddSigner(ctx context.Context, phone, envelopeID string, in AddSignerInput) (*AddSignerResult, error) {
+	if strings.TrimSpace(envelopeID) == "" {
+		return nil, fmt.Errorf("clicksign: envelope id is required")
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		return nil, fmt.Errorf("clicksign: signer name is required")
+	}
+	// JSON:API envelope.
+	payload := struct {
+		Data struct {
+			Type       string         `json:"type"`
+			Attributes AddSignerInput `json:"attributes"`
+		} `json:"data"`
+	}{}
+	payload.Data.Type = "signers"
+	payload.Data.Attributes = in
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("clicksign: marshal add signer: %w", err)
+	}
+	raw, _, err := c.do(ctx, phone, http.MethodPost, "/envelopes/"+envelopeID+"/signers", contentVndAPI, body)
+	if err != nil {
+		return nil, err
+	}
+	// Minimal JSON:API decoder to extract the id/email/name we care about.
+	var resp struct {
+		Data struct {
+			ID         string `json:"id"`
+			Attributes struct {
+				Name  string `json:"name"`
+				Email string `json:"email"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("clicksign: decode add signer: %w", err)
+	}
+	return &AddSignerResult{
+		ID:    resp.Data.ID,
+		Name:  resp.Data.Attributes.Name,
+		Email: resp.Data.Attributes.Email,
+		Raw:   raw,
+	}, nil
+}
+
+// DeleteEnvelope removes a draft envelope (DELETE /envelopes/{id}).
+//
+// Per the public docs (https://developers.clicksign.com/reference/api-excluir-envelope)
+// this only succeeds when the envelope is still in status "draft". Any
+// other status yields 403 with a business-rule message
+// ("envelope n\u00e3o est\u00e1 com status draft"); callers can detect this via
+// the returned *APIError.Status == 403.
+//
+// Clicksign v3 does NOT expose a separate "cancel running envelope"
+// endpoint; the only way to stop a running envelope is from the web UI.
+func (c *Client) DeleteEnvelope(ctx context.Context, phone, envelopeID string) error {
+	if strings.TrimSpace(envelopeID) == "" {
+		return fmt.Errorf("clicksign: envelope id is required")
+	}
+	_, _, err := c.do(ctx, phone, http.MethodDelete, "/envelopes/"+envelopeID, contentVndAPI, nil)
+	return err
 }
 
 // NotifyEnvelope sends a reminder to every pending signer in the envelope.

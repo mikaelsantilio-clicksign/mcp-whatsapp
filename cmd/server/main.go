@@ -265,6 +265,8 @@ func buildFlowPipeline(
 		flow.NewEnvelopeStatusFlow(cs),
 		flow.NewCreateEnvelopePDFFlow(cs, fetcher),
 		flow.NewCreateEnvelopeTmplFlow(cs),
+		flow.NewAddSignerFlow(cs),
+		flow.NewCancelEnvelopeFlow(cs),
 	)
 	return api.NewFlowPipeline(cfg, logger, store, intentClassifier, nluExt, router)
 }

@@ -74,3 +74,15 @@ Mensagem: "envia esse PDF https://x.com/c.pdf, nome do envelope Contrato 1, sign
 
 Mensagem: "sim"
 {"intent":"unknown","entities":{"account_key":null,"account_index":null,"envelope_id":null,"envelope_name":null,"template_id":null,"template_name":null,"pdf_url":null,"filter_status":null,"signers":null},"confidence":"low"}
+
+Mensagem: "adicione o signatário Maria Souza maria@empresa.com como parte no envelope Contrato Stg 1"
+{"intent":"add_signer","entities":{"account_key":null,"account_index":null,"envelope_id":null,"envelope_name":"Contrato Stg 1","template_id":null,"template_name":null,"pdf_url":null,"filter_status":null,"signers":[{"name":"Maria Souza","email":"maria@empresa.com","role":"party"}]},"confidence":"high"}
+
+Mensagem: "adiciona um signatário no envelope 030f3922-68da-47df-bbe4-068c8f9ae432"
+{"intent":"add_signer","entities":{"account_key":null,"account_index":null,"envelope_id":"030f3922-68da-47df-bbe4-068c8f9ae432","envelope_name":null,"template_id":null,"template_name":null,"pdf_url":null,"filter_status":null,"signers":null},"confidence":"medium"}
+
+Mensagem: "cancela o envelope Contrato Stg 1"
+{"intent":"cancel_envelope","entities":{"account_key":null,"account_index":null,"envelope_id":null,"envelope_name":"Contrato Stg 1","template_id":null,"template_name":null,"pdf_url":null,"filter_status":null,"signers":null},"confidence":"high"}
+
+Mensagem: "apagar o envelope 030f3922-68da-47df-bbe4-068c8f9ae432"
+{"intent":"cancel_envelope","entities":{"account_key":null,"account_index":null,"envelope_id":"030f3922-68da-47df-bbe4-068c8f9ae432","envelope_name":null,"template_id":null,"template_name":null,"pdf_url":null,"filter_status":null,"signers":null},"confidence":"high"}
