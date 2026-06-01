@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/clicksign/whatsapp-mcp/internal/config"
@@ -78,14 +80,14 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reg, err := h.store.GetClientRegistration(ctx)
+	clientID, err := h.resolveOAuthClientID(ctx)
 	if err != nil {
-		h.logger.Error("oauth_client_registration_missing", slog.String("err", err.Error()))
+		h.logger.Error("oauth_client_id_unavailable", slog.String("err", err.Error()))
 		h.renderExpired(w, http.StatusInternalServerError)
 		return
 	}
 
-	token, err := h.oauth.ExchangeCode(ctx, reg.ClientID, h.cfg.RedirectURI(), code, pending.CodeVerifier)
+	token, err := h.oauth.ExchangeCode(ctx, clientID, h.cfg.RedirectURI(), code, pending.CodeVerifier)
 	if err != nil {
 		h.logger.Error("oauth_code_exchange_failed",
 			slog.String("err", err.Error()),
@@ -126,6 +128,24 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.renderSuccess(w)
+}
+
+// resolveOAuthClientID returns the OAuth client_id for this deployment.
+// In direct mode it comes from config; in MCP/legacy mode from the DCR
+// record persisted at bootstrap.
+func (h *OAuthHandler) resolveOAuthClientID(ctx context.Context) (string, error) {
+	if h.cfg.OAuthDirect() {
+		id := strings.TrimSpace(h.cfg.OAuthClientID)
+		if id == "" {
+			return "", fmt.Errorf("OAUTH_CLIENT_ID is empty in direct mode")
+		}
+		return id, nil
+	}
+	reg, err := h.store.GetClientRegistration(ctx)
+	if err != nil {
+		return "", err
+	}
+	return reg.ClientID, nil
 }
 
 // ShortLink handles GET /c/{token}, redirecting to the real authorize URL.

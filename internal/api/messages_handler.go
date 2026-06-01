@@ -246,13 +246,13 @@ func (h *MessagesHandler) respondNeedsAuth(ctx context.Context, w http.ResponseW
 		h.internalError(w, err)
 		return
 	}
-	reg, err := h.store.GetClientRegistration(ctx)
+	clientID, err := h.resolveOAuthClientID(ctx)
 	if err != nil {
-		h.logger.Error("client_registration_missing", slog.String("err", err.Error()))
+		h.logger.Error("oauth_client_id_unavailable", slog.String("err", err.Error()))
 		h.internalError(w, err)
 		return
 	}
-	authorizeURL, err := h.oauth.BuildAuthorizeURL(reg.ClientID, h.cfg.RedirectURI(), state, pkce.Challenge, h.cfg.MCPOAuthScopes)
+	authorizeURL, err := h.oauth.BuildAuthorizeURL(clientID, h.cfg.RedirectURI(), state, pkce.Challenge, h.cfg.OAuthScopesOrDefault())
 	if err != nil {
 		h.internalError(w, err)
 		return
@@ -275,6 +275,24 @@ func (h *MessagesHandler) respondNeedsAuth(ctx context.Context, w http.ResponseW
 		Reply:        replyBuilder(shortURL),
 		AuthorizeURL: authorizeURL,
 	})
+}
+
+// resolveOAuthClientID picks the right client_id depending on the OAuth
+// mode. In direct mode the value comes from config (a pre-registered
+// confidential client). In MCP/legacy mode we fetch the DCR record.
+func (h *MessagesHandler) resolveOAuthClientID(ctx context.Context) (string, error) {
+	if h.cfg.OAuthDirect() {
+		id := strings.TrimSpace(h.cfg.OAuthClientID)
+		if id == "" {
+			return "", fmt.Errorf("OAUTH_CLIENT_ID is empty in direct mode")
+		}
+		return id, nil
+	}
+	reg, err := h.store.GetClientRegistration(ctx)
+	if err != nil {
+		return "", err
+	}
+	return reg.ClientID, nil
 }
 
 func (h *MessagesHandler) internalError(w http.ResponseWriter, err error) {

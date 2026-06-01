@@ -19,7 +19,9 @@ type Config struct {
 	APIStaticToken string `mapstructure:"api_static_token"`
 	PublicBaseURL  string `mapstructure:"public_base_url"`
 
-	// MCP Server (Clicksign)
+	// MCP Server (Clicksign) — used when OAuthMode=="mcp" (the legacy DCR
+	// path that goes through the Clicksign MCP fa\u00e7ade). When OAuthMode is
+	// "direct" these fields are ignored.
 	MCPServerBaseURL string `mapstructure:"mcp_server_base_url"`
 	MCPEndpointPath  string `mapstructure:"mcp_endpoint_path"`
 	MCPOAuthScopes   string `mapstructure:"mcp_oauth_scopes"`
@@ -28,6 +30,27 @@ type Config struct {
 	OAuthRedirectPath string `mapstructure:"oauth_redirect_path"`
 	StateHMACSecret   string `mapstructure:"state_hmac_secret"`
 	PKCETTLSeconds    int    `mapstructure:"pkce_ttl_seconds"`
+
+	// OAuthMode selects the OAuth flow:
+	//   - "direct" (default): talk straight to the Clicksign Cognito with a
+	//     pre-registered confidential client. Requires OAuthAuthorizeURL,
+	//     OAuthTokenURL, OAuthClientID and OAuthClientSecret to be set.
+	//   - "mcp" (legacy): use the Clicksign MCP server as an OAuth fa\u00e7ade,
+	//     register a public client dynamically (DCR), and let the fa\u00e7ade
+	//     talk to Cognito on our behalf.
+	OAuthMode string `mapstructure:"oauth_mode"`
+
+	// Direct-mode endpoints. Defaults to the staging Cognito.
+	OAuthAuthorizeURL string `mapstructure:"oauth_authorize_url"`
+	OAuthTokenURL     string `mapstructure:"oauth_token_url"`
+	// OAuthClientID / OAuthClientSecret are the confidential client
+	// credentials issued by Clicksign for our app. Only used in direct
+	// mode.
+	OAuthClientID     string `mapstructure:"oauth_client_id"`
+	OAuthClientSecret string `mapstructure:"oauth_client_secret"`
+	// OAuthScopes is the space-separated list requested at /login. The
+	// Cognito user pool decides what is granted. Defaults to "openid email phone".
+	OAuthScopes string `mapstructure:"oauth_scopes"`
 
 	// OpenAI
 	OpenAIAPIKey             string `mapstructure:"openai_api_key"`
@@ -113,6 +136,28 @@ func (c *Config) PipelineFlow() bool {
 	return strings.EqualFold(strings.TrimSpace(c.Pipeline), "flow")
 }
 
+// OAuthDirect reports whether the OAuth path skips DCR/MCP and talks
+// straight to the Clicksign Cognito. This is the default since Phase 3+.
+func (c *Config) OAuthDirect() bool {
+	mode := strings.ToLower(strings.TrimSpace(c.OAuthMode))
+	// Empty defaults to "direct" so a fresh deployment never accidentally
+	// goes through the MCP fa\u00e7ade (which is meant for external MCP clients,
+	// not our backend).
+	return mode == "" || mode == "direct"
+}
+
+// OAuthScopesOrDefault returns the scopes string for the /authorize call,
+// falling back to MCPOAuthScopes (legacy var) and then to a sensible default.
+func (c *Config) OAuthScopesOrDefault() string {
+	if s := strings.TrimSpace(c.OAuthScopes); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(c.MCPOAuthScopes); s != "" {
+		return s
+	}
+	return "openid email phone"
+}
+
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
@@ -141,11 +186,17 @@ func Load() (*Config, error) {
 	v.SetDefault("session_backend", "memory")
 	v.SetDefault("dynamodb_table_name", "whatsapp_mcp_sessions")
 	v.SetDefault("aws_region", "us-east-1")
-	v.SetDefault("pipeline", "legacy")
-	v.SetDefault("clicksign_api_base_url", "https://app.clicksign.com/api/v3")
+	v.SetDefault("pipeline", "flow")
+	// Staging defaults — flip CLICKSIGN_API_BASE_URL to
+	// https://app.clicksign.com/api/v3 in production.
+	v.SetDefault("clicksign_api_base_url", "https://4.clicksign.dev/api/v3")
 	v.SetDefault("clicksign_api_timeout_seconds", 20)
 	v.SetDefault("nlu_model", "gpt-4o-mini")
 	v.SetDefault("nlu_timeout_seconds", 15)
+	v.SetDefault("oauth_mode", "direct")
+	v.SetDefault("oauth_authorize_url", "https://oauth2.clicksign.dev/login")
+	v.SetDefault("oauth_token_url", "https://oauth2.clicksign.dev/oauth2/token")
+	v.SetDefault("oauth_scopes", "openid email phone")
 
 	for _, key := range []string{
 		"port", "log_level",
@@ -160,6 +211,8 @@ func Load() (*Config, error) {
 		"pipeline",
 		"clicksign_api_base_url", "clicksign_api_timeout_seconds",
 		"nlu_model", "nlu_timeout_seconds",
+		"oauth_mode", "oauth_authorize_url", "oauth_token_url",
+		"oauth_client_id", "oauth_client_secret", "oauth_scopes",
 	} {
 		_ = v.BindEnv(key, strings.ToUpper(key))
 	}
@@ -188,6 +241,20 @@ func (c *Config) validate() error {
 	}
 	if c.OpenAIAPIKey == "" {
 		missing = append(missing, "OPENAI_API_KEY")
+	}
+	if c.OAuthDirect() {
+		if strings.TrimSpace(c.OAuthClientID) == "" {
+			missing = append(missing, "OAUTH_CLIENT_ID")
+		}
+		if strings.TrimSpace(c.OAuthClientSecret) == "" {
+			missing = append(missing, "OAUTH_CLIENT_SECRET")
+		}
+		if strings.TrimSpace(c.OAuthAuthorizeURL) == "" {
+			missing = append(missing, "OAUTH_AUTHORIZE_URL")
+		}
+		if strings.TrimSpace(c.OAuthTokenURL) == "" {
+			missing = append(missing, "OAUTH_TOKEN_URL")
+		}
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))

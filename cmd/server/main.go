@@ -45,15 +45,37 @@ func run() error {
 
 	store := session.NewMemoryStore()
 
-	oauthClient := oauth.NewClient(cfg.MCPServerBaseURL)
+	var oauthClient *oauth.Client
+	if cfg.OAuthDirect() {
+		oauthClient = oauth.NewDirectClient(oauth.DirectConfig{
+			AuthorizationURL: cfg.OAuthAuthorizeURL,
+			TokenURL:         cfg.OAuthTokenURL,
+			ClientID:         cfg.OAuthClientID,
+			ClientSecret:     cfg.OAuthClientSecret,
+		})
+		logger.Info("oauth_mode_direct",
+			slog.String("authorize_url", cfg.OAuthAuthorizeURL),
+			slog.String("token_url", cfg.OAuthTokenURL),
+			slog.String("client_id_prefix", prefix(cfg.OAuthClientID, 8)),
+		)
+	} else {
+		oauthClient = oauth.NewClient(cfg.MCPServerBaseURL)
+		logger.Info("oauth_mode_mcp",
+			slog.String("mcp_base_url", cfg.MCPServerBaseURL),
+		)
+	}
 	signer := oauth.NewStateSigner(cfg.StateHMACSecret)
 
-	bootCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := bootstrapOAuthClient(bootCtx, logger, cfg, oauthClient, store); err != nil {
-		// Don't fail hard — log and continue. The /api/messages handler will
-		// re-attempt when needed (DCR is on the critical path of needs_auth).
-		logger.Error("oauth_bootstrap_failed", slog.String("err", err.Error()))
+	// DCR is only needed in MCP/legacy mode. In direct mode our client is
+	// already confidential and registered manually.
+	if !cfg.OAuthDirect() {
+		bootCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := bootstrapOAuthClient(bootCtx, logger, cfg, oauthClient, store); err != nil {
+			// Don't fail hard — log and continue. The /api/messages handler will
+			// re-attempt when needed (DCR is on the critical path of needs_auth).
+			logger.Error("oauth_bootstrap_failed", slog.String("err", err.Error()))
+		}
 	}
 
 	mcpManager := mcpclient.NewManager(cfg, logger, store, oauthClient)
@@ -220,6 +242,13 @@ func buildFlowPipeline(
 		Timeout: cfg.ClicksignAPITimeout(),
 	}, logger, store, oauthClient)
 
+	fetcher := clicksign.NewHTTPFileFetcher(clicksign.FetcherConfig{
+		Logger: logger,
+		// AllowHTTP / AllowPrivateIPs stay false in production. The
+		// n8n integration contract requires every URL to be https://
+		// public storage.
+	})
+
 	var nluExt nlu.Extractor = nlu.Static{V: nlu.Verdict{Intent: nlu.IntentUnknown, Confidence: nlu.ConfLow}}
 	if cfg.OpenAIAPIKey != "" {
 		nluExt = nlu.NewOpenAI(logger, nlu.OpenAIConfig{
@@ -234,6 +263,8 @@ func buildFlowPipeline(
 		flow.NewListTemplatesFlow(cs),
 		flow.NewListEnvelopesFlow(cs),
 		flow.NewEnvelopeStatusFlow(cs),
+		flow.NewCreateEnvelopePDFFlow(cs, fetcher),
+		flow.NewCreateEnvelopeTmplFlow(cs),
 	)
 	return api.NewFlowPipeline(cfg, logger, store, intentClassifier, nluExt, router)
 }
