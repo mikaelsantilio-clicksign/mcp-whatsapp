@@ -232,6 +232,8 @@ func buildFlowPipeline(
 	router := flow.NewRouter(logger,
 		flow.NewSelectAccountFlow(cs),
 		flow.NewListTemplatesFlow(cs),
+		flow.NewListEnvelopesFlow(cs),
+		flow.NewEnvelopeStatusFlow(cs),
 	)
 	return api.NewFlowPipeline(cfg, logger, store, intentClassifier, nluExt, router)
 }
