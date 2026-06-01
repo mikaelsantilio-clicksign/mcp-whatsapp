@@ -53,7 +53,7 @@ func run() error {
 	}
 
 	mcpManager := mcpclient.NewManager(cfg, logger, store, oauthClient)
-	conversation := llm.NewConversation(cfg, logger, mcpManager)
+	conversation := llm.NewConversation(cfg, logger, store, mcpManager)
 	notifier := n8n.NewNotifier(logger, cfg.N8NWebhookURL, cfg.N8NWebhookToken)
 
 	messages := api.NewMessagesHandler(cfg, logger, store, oauthClient, signer, conversation)

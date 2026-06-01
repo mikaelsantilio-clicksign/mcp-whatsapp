@@ -32,8 +32,8 @@ func (m *MemoryStore) GetSession(_ context.Context, phone string) (*Session, err
 	if !ok {
 		return nil, ErrNotFound
 	}
-	cp := *s
-	return &cp, nil
+	cp := copySession(s)
+	return cp, nil
 }
 
 func (m *MemoryStore) PutSession(_ context.Context, s *Session) error {
@@ -42,12 +42,42 @@ func (m *MemoryStore) PutSession(_ context.Context, s *Session) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cp := *s
+	cp := copySession(s)
 	if cp.UpdatedAt.IsZero() {
 		cp.UpdatedAt = time.Now().UTC()
 	}
-	m.sessions[s.PhoneNumber] = &cp
+	m.sessions[s.PhoneNumber] = cp
 	return nil
+}
+
+// copySession deep-copies a Session including the History slice and the
+// nested ToolCalls slices so callers can mutate the returned value without
+// affecting the stored record.
+func copySession(s *Session) *Session {
+	if s == nil {
+		return nil
+	}
+	cp := *s
+	if len(s.History) > 0 {
+		cp.History = make([]ChatTurn, len(s.History))
+		for i, t := range s.History {
+			cp.History[i] = copyChatTurn(t)
+		}
+	} else {
+		cp.History = nil
+	}
+	return &cp
+}
+
+func copyChatTurn(t ChatTurn) ChatTurn {
+	out := t
+	if len(t.ToolCalls) > 0 {
+		out.ToolCalls = make([]ChatToolCall, len(t.ToolCalls))
+		copy(out.ToolCalls, t.ToolCalls)
+	} else {
+		out.ToolCalls = nil
+	}
+	return out
 }
 
 func (m *MemoryStore) DeleteSession(_ context.Context, phone string) error {

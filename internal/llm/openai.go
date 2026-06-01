@@ -16,22 +16,27 @@ import (
 	"github.com/clicksign/whatsapp-mcp/internal/conv"
 	"github.com/clicksign/whatsapp-mcp/internal/logging"
 	"github.com/clicksign/whatsapp-mcp/internal/mcpclient"
+	"github.com/clicksign/whatsapp-mcp/internal/session"
 )
 
-// Conversation implements api.Conversation by orchestrating an OpenAI chat
-// completion loop that can call tools from a remote MCP server.
+// Conversation implements conv.Conversation by orchestrating an OpenAI chat
+// completion loop that can call tools from a remote MCP server. It also
+// persists the per-user message history in the session store so subsequent
+// requests have context of prior turns.
 type Conversation struct {
 	cfg    *config.Config
 	logger *slog.Logger
+	store  session.Store
 	mgr    *mcpclient.Manager
 	oai    openai.Client
 }
 
-func NewConversation(cfg *config.Config, logger *slog.Logger, mgr *mcpclient.Manager) *Conversation {
+func NewConversation(cfg *config.Config, logger *slog.Logger, store session.Store, mgr *mcpclient.Manager) *Conversation {
 	cli := openai.NewClient(option.WithAPIKey(cfg.OpenAIAPIKey))
 	return &Conversation{
 		cfg:    cfg,
 		logger: logger,
+		store:  store,
 		mgr:    mgr,
 		oai:    cli,
 	}
@@ -75,11 +80,27 @@ func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, err
 		})
 	}
 
-	messages := []openai.ChatCompletionMessageParamUnion{
-		openai.SystemMessage(SystemPrompt()),
-		openai.UserMessage(buildUserContent(in)),
+	// Load prior history (if any) and rehydrate the OpenAI message array.
+	// Errors loading history are non-fatal: we still serve the request, just
+	// without prior context.
+	var priorHistory []session.ChatTurn
+	if sess, err := c.store.GetSession(ctx, in.Phone); err == nil {
+		priorHistory = sess.History
 	}
 
+	messages := []openai.ChatCompletionMessageParamUnion{
+		openai.SystemMessage(SystemPrompt()),
+	}
+	for _, t := range priorHistory {
+		messages = append(messages, toOpenAIMessage(t))
+	}
+
+	userTurn := session.ChatTurn{Role: "user", Content: buildUserContent(in)}
+	messages = append(messages, openai.UserMessage(userTurn.Content))
+
+	// newTurns accumulates the turns produced in this Run that should be
+	// appended to the persisted history when we finish successfully.
+	newTurns := []session.ChatTurn{userTurn}
 	traces := make([]conv.ToolCallTrace, 0)
 
 	for iter := 0; iter < c.cfg.OpenAIMaxToolIterations; iter++ {
@@ -109,12 +130,19 @@ func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, err
 			if reply == "" {
 				reply = LLMFailure()
 			}
+			newTurns = append(newTurns, session.ChatTurn{Role: "assistant", Content: reply})
+			c.persistHistory(ctx, in.Phone, priorHistory, newTurns)
 			return conv.Output{Reply: reply, ToolCalls: traces}, nil
 		}
 
 		// Persist the assistant turn (with its tool_calls) so the next request
 		// can reference them via tool_call_id.
 		messages = append(messages, assistantMsg.ToParam())
+		newTurns = append(newTurns, session.ChatTurn{
+			Role:      "assistant",
+			Content:   assistantMsg.Content,
+			ToolCalls: extractToolCalls(assistantMsg.ToolCalls),
+		})
 
 		// Execute each tool_call in order and append a tool message for each.
 		for _, tc := range assistantMsg.ToolCalls {
@@ -163,13 +191,54 @@ func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, err
 			}
 			traces = append(traces, trace)
 			messages = append(messages, openai.ToolMessage(toolPayload, tc.ID))
+			newTurns = append(newTurns, session.ChatTurn{
+				Role:       "tool",
+				Content:    toolPayload,
+				ToolCallID: tc.ID,
+			})
 		}
 	}
 
+	// Loop exhausted — return a generic reply but do NOT persist the
+	// half-finished history, since the next request would start from an
+	// inconsistent state (assistant tool_call with no matching final
+	// assistant reply).
 	return conv.Output{
 		Reply:     MaxIterations(),
 		ToolCalls: traces,
 	}, nil
+}
+
+// persistHistory appends newly produced turns to the prior history, truncates
+// to the configured maximum and writes the session back. Failures are logged
+// but not propagated — saving history is a best-effort enhancement, not a
+// correctness requirement for the current response.
+func (c *Conversation) persistHistory(ctx context.Context, phone string, prior, newTurns []session.ChatTurn) {
+	merged := make([]session.ChatTurn, 0, len(prior)+len(newTurns))
+	merged = append(merged, prior...)
+	merged = append(merged, newTurns...)
+	trimmed := truncateHistory(merged, maxHistoryTurns)
+
+	sess, err := c.store.GetSession(ctx, phone)
+	if err != nil {
+		c.logger.Warn("history_persist_session_missing",
+			slog.String("phone_hash", logging.HashPhone(phone)),
+			slog.String("err", err.Error()),
+		)
+		return
+	}
+	sess.History = trimmed
+	if err := c.store.PutSession(ctx, sess); err != nil {
+		c.logger.Warn("history_persist_failed",
+			slog.String("phone_hash", logging.HashPhone(phone)),
+			slog.String("err", err.Error()),
+		)
+		return
+	}
+	c.logger.Debug("history_persisted",
+		slog.String("phone_hash", logging.HashPhone(phone)),
+		slog.Int("turns", len(trimmed)),
+	)
 }
 
 func buildUserContent(in conv.Input) string {
