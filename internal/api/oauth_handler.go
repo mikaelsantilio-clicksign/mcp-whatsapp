@@ -7,11 +7,18 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/clicksign/whatsapp-mcp/internal/clicksign"
 	"github.com/clicksign/whatsapp-mcp/internal/config"
 	"github.com/clicksign/whatsapp-mcp/internal/logging"
 	"github.com/clicksign/whatsapp-mcp/internal/oauth"
 	"github.com/clicksign/whatsapp-mcp/internal/session"
 )
+
+// AccountLister is the minimal interface the OAuth handler needs to resolve
+// the user's default Clicksign account right after the token exchange.
+type AccountLister interface {
+	ListOAuth2AccountsWithToken(ctx context.Context, accessToken string) ([]clicksign.OAuth2Account, error)
+}
 
 // N8NNotifier is the minimal interface the OAuth handler needs to optionally
 // notify n8n that an OAuth flow succeeded.
@@ -20,12 +27,13 @@ type N8NNotifier interface {
 }
 
 type OAuthHandler struct {
-	cfg     *config.Config
-	logger  *slog.Logger
-	store   session.Store
-	oauth   *oauth.Client
-	signer  *oauth.StateSigner
-	n8n     N8NNotifier
+	cfg      *config.Config
+	logger   *slog.Logger
+	store    session.Store
+	oauth    *oauth.Client
+	signer   *oauth.StateSigner
+	n8n      N8NNotifier
+	accounts AccountLister
 }
 
 func NewOAuthHandler(
@@ -35,14 +43,16 @@ func NewOAuthHandler(
 	oauthClient *oauth.Client,
 	signer *oauth.StateSigner,
 	n8n N8NNotifier,
+	accounts AccountLister,
 ) *OAuthHandler {
 	return &OAuthHandler{
-		cfg:    cfg,
-		logger: logger,
-		store:  store,
-		oauth:  oauthClient,
-		signer: signer,
-		n8n:    n8n,
+		cfg:      cfg,
+		logger:   logger,
+		store:    store,
+		oauth:    oauthClient,
+		signer:   signer,
+		n8n:      n8n,
+		accounts: accounts,
 	}
 }
 
@@ -102,6 +112,34 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    token.ExpiresAt(),
 		UpdatedAt:    time.Now().UTC(),
 	}
+
+	// Resolve the default account so subsequent tool calls already carry
+	// X-Account-Key. Best-effort: failures are logged but do not block
+	// login — the LLM can recover via the select_account tool.
+	if h.accounts != nil {
+		acctCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		accounts, accErr := h.accounts.ListOAuth2AccountsWithToken(acctCtx, token.AccessToken)
+		cancel()
+		switch {
+		case accErr != nil:
+			h.logger.Warn("oauth_callback_list_accounts_failed",
+				slog.String("phone_hash", logging.HashPhone(pending.PhoneNumber)),
+				slog.String("err", accErr.Error()),
+			)
+		case len(accounts) == 0:
+			h.logger.Warn("oauth_callback_no_accounts",
+				slog.String("phone_hash", logging.HashPhone(pending.PhoneNumber)),
+			)
+		default:
+			sess.AccountKey = accounts[0].Attributes.Key
+			h.logger.Info("oauth_callback_account_selected",
+				slog.String("phone_hash", logging.HashPhone(pending.PhoneNumber)),
+				slog.Int("accounts_count", len(accounts)),
+				slog.String("account_name", accounts[0].Attributes.Name),
+			)
+		}
+	}
+
 	if err := h.store.PutSession(ctx, sess); err != nil {
 		h.logger.Error("oauth_session_put_failed", slog.String("err", err.Error()))
 		h.renderExpired(w, http.StatusInternalServerError)
@@ -115,11 +153,11 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if h.n8n != nil {
-		// Fire-and-forget with short timeout to keep the redirect snappy.
+		accountKey := sess.AccountKey
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := h.n8n.OAuthSuccess(ctx, pending.PhoneNumber, ""); err != nil {
+			if err := h.n8n.OAuthSuccess(ctx, pending.PhoneNumber, accountKey); err != nil {
 				h.logger.Warn("n8n_notify_failed", slog.String("err", err.Error()))
 			}
 		}()

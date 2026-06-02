@@ -13,23 +13,25 @@ import (
 	"github.com/openai/openai-go/shared"
 
 	"github.com/clicksign/whatsapp-mcp/internal/classifier"
+	"github.com/clicksign/whatsapp-mcp/internal/clicksign"
 	"github.com/clicksign/whatsapp-mcp/internal/config"
 	"github.com/clicksign/whatsapp-mcp/internal/conv"
 	"github.com/clicksign/whatsapp-mcp/internal/logging"
-	"github.com/clicksign/whatsapp-mcp/internal/mcpclient"
 	"github.com/clicksign/whatsapp-mcp/internal/session"
+	"github.com/clicksign/whatsapp-mcp/internal/tools"
 )
 
 // Conversation implements conv.Conversation by orchestrating an OpenAI chat
-// completion loop that can call tools from a remote MCP server. It also
-// persists the per-user message history in the session store so subsequent
-// requests have context of prior turns, and gates incoming messages through
-// a cheap intent classifier before invoking the main loop.
+// completion loop that calls tools resolved through a tools.Runner (which
+// in turn talks to the Clicksign REST API). It also persists the per-user
+// message history in the session store so subsequent requests have context
+// of prior turns, and gates incoming messages through a cheap intent
+// classifier before invoking the main loop.
 type Conversation struct {
 	cfg        *config.Config
 	logger     *slog.Logger
 	store      session.Store
-	mgr        *mcpclient.Manager
+	tools      tools.Runner
 	oai        openai.Client
 	classifier classifier.Classifier
 	metaHelp   *MetaHelpResponder // optional; nil → fall back to static Capabilities()
@@ -39,7 +41,7 @@ func NewConversation(
 	cfg *config.Config,
 	logger *slog.Logger,
 	store session.Store,
-	mgr *mcpclient.Manager,
+	runner tools.Runner,
 	cls classifier.Classifier,
 	meta *MetaHelpResponder,
 ) *Conversation {
@@ -51,7 +53,7 @@ func NewConversation(
 		cfg:        cfg,
 		logger:     logger,
 		store:      store,
-		mgr:        mgr,
+		tools:      runner,
 		oai:        cli,
 		classifier: cls,
 		metaHelp:   meta,
@@ -121,34 +123,28 @@ func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, err
 		}
 	}
 
-	conn, err := c.mgr.Open(ctx, in.Phone)
-	if err != nil {
-		if errors.Is(err, mcpclient.ErrAuthExpired) {
-			return conv.Output{}, conv.ErrSessionExpired
-		}
-		return conv.Output{}, fmt.Errorf("mcp open: %w", err)
+	// Sessions are guaranteed to exist at this point (the API layer checks
+	// before invoking us). We still verify so a stale store doesn't yield
+	// a confusing 500 — better to surface the OAuth re-auth flow.
+	if _, err := c.store.GetSession(ctx, in.Phone); err != nil {
+		return conv.Output{}, conv.ErrSessionExpired
 	}
-	defer conn.Close()
 
-	mcpTools, err := c.mgr.ListTools(ctx, conn)
+	catalog, err := c.tools.List(ctx, in.Phone)
 	if err != nil {
-		if errors.Is(err, mcpclient.ErrAuthExpired) {
+		if errors.Is(err, clicksign.ErrAuthExpired) {
 			return conv.Output{}, conv.ErrSessionExpired
 		}
 		return conv.Output{}, fmt.Errorf("list tools: %w", err)
 	}
-	openaiTools, err := mcpclient.ToOpenAITools(mcpTools)
-	if err != nil {
-		return conv.Output{}, fmt.Errorf("tools schema: %w", err)
-	}
 
-	tools := make([]openai.ChatCompletionToolParam, 0, len(openaiTools))
-	for _, t := range openaiTools {
-		tools = append(tools, openai.ChatCompletionToolParam{
+	openAITools := make([]openai.ChatCompletionToolParam, 0, len(catalog))
+	for _, t := range catalog {
+		openAITools = append(openAITools, openai.ChatCompletionToolParam{
 			Function: shared.FunctionDefinitionParam{
-				Name:        t.Function.Name,
-				Description: openai.String(t.Function.Description),
-				Parameters:  shared.FunctionParameters(t.Function.Parameters),
+				Name:        t.Name,
+				Description: openai.String(t.Description),
+				Parameters:  shared.FunctionParameters(t.Parameters),
 			},
 		})
 	}
@@ -175,8 +171,8 @@ func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, err
 			Model:    shared.ChatModel(c.cfg.OpenAIModel),
 			Messages: messages,
 		}
-		if len(tools) > 0 {
-			req.Tools = tools
+		if len(openAITools) > 0 {
+			req.Tools = openAITools
 		}
 
 		callCtx, cancel := context.WithTimeout(ctx, c.cfg.OpenAITimeout())
@@ -231,11 +227,11 @@ func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, err
 				slog.Int("iter", iter),
 			)
 
-			result, callErr := c.mgr.CallTool(ctx, conn, name, args)
+			result, callErr := c.tools.Call(ctx, in.Phone, name, args)
 			trace := conv.ToolCallTrace{Name: name}
 			var toolPayload string
 			switch {
-			case errors.Is(callErr, mcpclient.ErrAuthExpired):
+			case errors.Is(callErr, clicksign.ErrAuthExpired):
 				return conv.Output{ToolCalls: traces}, conv.ErrSessionExpired
 			case callErr != nil:
 				trace.OK = false
@@ -247,11 +243,8 @@ func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, err
 					slog.String("err", callErr.Error()),
 				)
 			default:
-				trace.OK = !result.IsError
-				if result.IsError {
-					trace.Err = mcpclient.ExtractText(result)
-				}
-				toolPayload = mcpclient.ExtractText(result)
+				trace.OK = true
+				toolPayload = result
 				if toolPayload == "" {
 					toolPayload = "{}"
 				}

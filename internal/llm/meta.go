@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/shared"
@@ -16,17 +15,17 @@ import (
 	"github.com/clicksign/whatsapp-mcp/internal/classifier"
 	"github.com/clicksign/whatsapp-mcp/internal/config"
 	"github.com/clicksign/whatsapp-mcp/internal/logging"
-	"github.com/clicksign/whatsapp-mcp/internal/mcpclient"
+	"github.com/clicksign/whatsapp-mcp/internal/tools"
 )
 
 // MetaHelpResponder generates the natural-language reply for messages
 // classified as "meta_help" (greetings, thanks, capability questions).
 //
 // It calls a cheap chat model (no tools) with a dedicated system prompt that
-// gets dynamically grounded with the current set of MCP tools available on
-// the server. This keeps the reply factually aligned with what the bot can
-// actually do, and prevents the main LLM (which has tool-calling enabled)
-// from being invoked for a "oi".
+// gets dynamically grounded with the current set of tools the bot exposes.
+// This keeps the reply factually aligned with what the bot can actually do,
+// and prevents the main LLM (which has tool-calling enabled) from being
+// invoked for a "oi".
 //
 // Failure semantics: any error (timeout, OpenAI down) is logged and the
 // caller falls back to the static Capabilities() reply. The bot stays
@@ -36,10 +35,10 @@ type MetaHelpResponder struct {
 	client  openai.Client
 	model   string
 	timeout time.Duration
-	mgr     *mcpclient.Manager
+	tools   tools.Runner
 }
 
-func NewMetaHelpResponder(cfg *config.Config, logger *slog.Logger, mgr *mcpclient.Manager) *MetaHelpResponder {
+func NewMetaHelpResponder(cfg *config.Config, logger *slog.Logger, runner tools.Runner) *MetaHelpResponder {
 	timeout := cfg.MetaHelpTimeout()
 	if timeout == 0 {
 		timeout = 10 * time.Second
@@ -53,7 +52,7 @@ func NewMetaHelpResponder(cfg *config.Config, logger *slog.Logger, mgr *mcpclien
 		client:  openai.NewClient(option.WithAPIKey(cfg.OpenAIAPIKey)),
 		model:   model,
 		timeout: timeout,
-		mgr:     mgr,
+		tools:   runner,
 	}
 }
 
@@ -68,12 +67,19 @@ func (r *MetaHelpResponder) Respond(
 ) (string, error) {
 	phoneHash := logging.HashPhone(phone)
 
-	// Try the warm cache first; meta_help should NOT pay the cost of opening
-	// an MCP connection just to populate it. If the cache is cold we fall
-	// back to a generic placeholder in the prompt — the LLM has a hard-coded
-	// default list in the system prompt as a safety net.
-	tools := r.mgr.ListToolsCached()
-	toolsSummary := summarizeToolsForMetaPrompt(tools)
+	// The tools catalogue is fully static and cheap to enumerate, so we
+	// always pull a fresh copy. If listing fails we fall back to a generic
+	// placeholder in the prompt — the LLM has a hard-coded default list in
+	// the system prompt as a safety net.
+	toolList, listErr := r.tools.List(ctx, phone)
+	if listErr != nil {
+		r.logger.Debug("meta_help_tools_unavailable",
+			slog.String("phone_hash", phoneHash),
+			slog.String("err", listErr.Error()),
+		)
+		toolList = nil
+	}
+	toolsSummary := summarizeToolsForMetaPrompt(toolList)
 	systemPrompt := strings.ReplaceAll(MetaHelpPromptTemplate(), "{{TOOLS}}", toolsSummary)
 
 	messages := []openai.ChatCompletionMessageParamUnion{
@@ -111,25 +117,25 @@ func (r *MetaHelpResponder) Respond(
 
 	r.logger.Debug("meta_help_generated",
 		slog.String("phone_hash", phoneHash),
-		slog.Int("tools_in_prompt", len(tools)),
+		slog.Int("tools_in_prompt", len(toolList)),
 		slog.Int("reply_len", len(out)),
 	)
 	return out, nil
 }
 
-// summarizeToolsForMetaPrompt renders the MCP tool list as "- name: description"
+// summarizeToolsForMetaPrompt renders the tool list as "- name: description"
 // lines for injection into the meta_help system prompt. The LLM is instructed
 // (in the prompt) to translate these names into natural Portuguese actions
 // and never to expose the raw `snake_case` names to the user.
 //
 // Empty list yields a placeholder that triggers the fallback default list
 // inside the prompt itself.
-func summarizeToolsForMetaPrompt(tools []mcp.Tool) string {
-	if len(tools) == 0 {
+func summarizeToolsForMetaPrompt(toolList []tools.Tool) string {
+	if len(toolList) == 0 {
 		return "(lista indisponível no momento — use as capacidades padrão descritas nas diretrizes)"
 	}
 	var sb strings.Builder
-	for _, t := range tools {
+	for _, t := range toolList {
 		name := strings.TrimSpace(t.Name)
 		if name == "" {
 			continue

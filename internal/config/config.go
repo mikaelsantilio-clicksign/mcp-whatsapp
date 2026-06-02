@@ -19,10 +19,18 @@ type Config struct {
 	APIStaticToken string `mapstructure:"api_static_token"`
 	PublicBaseURL  string `mapstructure:"public_base_url"`
 
-	// MCP Server (Clicksign)
+	// MCP Server (Clicksign) — usado apenas para o fluxo OAuth2 (DCR + authorize + token)
 	MCPServerBaseURL string `mapstructure:"mcp_server_base_url"`
 	MCPEndpointPath  string `mapstructure:"mcp_endpoint_path"`
 	MCPOAuthScopes   string `mapstructure:"mcp_oauth_scopes"`
+
+	// Clicksign REST API — usada na execução das tools (substitui o MCP `tools/call`)
+	ClicksignAPIBaseURL         string `mapstructure:"clicksign_api_base_url"`
+	ClicksignHTTPTimeoutSeconds int    `mapstructure:"clicksign_http_timeout_seconds"`
+
+	// FileFetcher (para create_envelope_with_file_url)
+	FileFetcherMaxBytes  int64 `mapstructure:"file_fetcher_max_bytes"`
+	FileFetcherAllowHTTP bool  `mapstructure:"file_fetcher_allow_http"`
 
 	// OAuth2 / DCR
 	OAuthRedirectPath string `mapstructure:"oauth_redirect_path"`
@@ -86,6 +94,10 @@ func (c *Config) MetaHelpTimeout() time.Duration {
 	return time.Duration(c.MetaHelpTimeoutSeconds) * time.Second
 }
 
+func (c *Config) ClicksignHTTPTimeout() time.Duration {
+	return time.Duration(c.ClicksignHTTPTimeoutSeconds) * time.Second
+}
+
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
@@ -95,9 +107,13 @@ func Load() (*Config, error) {
 
 	v.SetDefault("port", 8080)
 	v.SetDefault("log_level", "info")
-	v.SetDefault("mcp_server_base_url", "https://mcp-api-tavola-v3-6.clicksign.dev")
+	v.SetDefault("mcp_server_base_url", "https://mcp-api-tavola-v3.clicksign.com")
 	v.SetDefault("mcp_endpoint_path", "/mcp/oauth2")
 	v.SetDefault("mcp_oauth_scopes", "openid email phone")
+	v.SetDefault("clicksign_api_base_url", "https://app.clicksign.com/api/v3")
+	v.SetDefault("clicksign_http_timeout_seconds", 30)
+	v.SetDefault("file_fetcher_max_bytes", int64(20*1024*1024))
+	v.SetDefault("file_fetcher_allow_http", false)
 	v.SetDefault("oauth_redirect_path", "/oauth2/callback")
 	v.SetDefault("pkce_ttl_seconds", 300)
 	v.SetDefault("openai_model", "gpt-4o-mini")
@@ -119,6 +135,8 @@ func Load() (*Config, error) {
 		"port", "log_level",
 		"api_static_token", "public_base_url",
 		"mcp_server_base_url", "mcp_endpoint_path", "mcp_oauth_scopes",
+		"clicksign_api_base_url", "clicksign_http_timeout_seconds",
+		"file_fetcher_max_bytes", "file_fetcher_allow_http",
 		"oauth_redirect_path", "state_hmac_secret", "pkce_ttl_seconds",
 		"openai_api_key", "openai_model", "openai_max_tool_iterations", "openai_timeout_seconds",
 		"classifier_enabled", "classifier_model", "classifier_timeout_seconds", "classifier_cache_ttl_seconds", "classifier_context_turns",

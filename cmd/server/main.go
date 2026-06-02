@@ -16,13 +16,14 @@ import (
 
 	"github.com/clicksign/whatsapp-mcp/internal/api"
 	"github.com/clicksign/whatsapp-mcp/internal/classifier"
+	"github.com/clicksign/whatsapp-mcp/internal/clicksign"
 	"github.com/clicksign/whatsapp-mcp/internal/config"
 	"github.com/clicksign/whatsapp-mcp/internal/llm"
 	"github.com/clicksign/whatsapp-mcp/internal/logging"
-	"github.com/clicksign/whatsapp-mcp/internal/mcpclient"
 	"github.com/clicksign/whatsapp-mcp/internal/n8n"
 	"github.com/clicksign/whatsapp-mcp/internal/oauth"
 	"github.com/clicksign/whatsapp-mcp/internal/session"
+	"github.com/clicksign/whatsapp-mcp/internal/tools"
 )
 
 func main() {
@@ -53,7 +54,23 @@ func run() error {
 		logger.Error("oauth_bootstrap_failed", slog.String("err", err.Error()))
 	}
 
-	mcpManager := mcpclient.NewManager(cfg, logger, store, oauthClient)
+	clicksignClient := clicksign.NewHTTPClient(
+		cfg.ClicksignAPIBaseURL,
+		cfg.ClicksignHTTPTimeout(),
+		logger,
+		store,
+		oauthClient,
+	)
+	fileFetcher := clicksign.NewHTTPFileFetcher(
+		clicksign.WithMaxBytes(cfg.FileFetcherMaxBytes),
+		clicksign.WithAllowHTTP(cfg.FileFetcherAllowHTTP),
+		clicksign.WithFetcherLogger(logger),
+	)
+	toolRunner := tools.NewStaticRunner(tools.Catalog(tools.CatalogDeps{
+		Clicksign:   clicksignClient,
+		Store:       store,
+		FileFetcher: fileFetcher,
+	}))
 
 	var intentClassifier classifier.Classifier = classifier.AlwaysOnTopic{}
 	if cfg.ClassifierEnabled {
@@ -73,7 +90,7 @@ func run() error {
 
 	var metaResponder *llm.MetaHelpResponder
 	if cfg.MetaHelpEnabled {
-		metaResponder = llm.NewMetaHelpResponder(cfg, logger, mcpManager)
+		metaResponder = llm.NewMetaHelpResponder(cfg, logger, toolRunner)
 		logger.Info("meta_help_enabled",
 			slog.String("model", cfg.MetaHelpModel),
 		)
@@ -81,11 +98,11 @@ func run() error {
 		logger.Info("meta_help_disabled_using_static_capabilities")
 	}
 
-	conversation := llm.NewConversation(cfg, logger, store, mcpManager, intentClassifier, metaResponder)
+	conversation := llm.NewConversation(cfg, logger, store, toolRunner, intentClassifier, metaResponder)
 	notifier := n8n.NewNotifier(logger, cfg.N8NWebhookURL, cfg.N8NWebhookToken)
 
 	messages := api.NewMessagesHandler(cfg, logger, store, oauthClient, signer, conversation)
-	oauthHandler := api.NewOAuthHandler(cfg, logger, store, oauthClient, signer, notifier)
+	oauthHandler := api.NewOAuthHandler(cfg, logger, store, oauthClient, signer, notifier, clicksignClient)
 	health := api.NewHealthHandler(cfg)
 
 	r := chi.NewRouter()
@@ -120,7 +137,8 @@ func run() error {
 		logger.Info("server_starting",
 			slog.String("addr", addr),
 			slog.String("redirect_uri", cfg.RedirectURI()),
-			slog.String("mcp_endpoint", cfg.MCPEndpointURL()),
+			slog.String("oauth_issuer", cfg.MCPServerBaseURL),
+			slog.String("clicksign_api", cfg.ClicksignAPIBaseURL),
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
