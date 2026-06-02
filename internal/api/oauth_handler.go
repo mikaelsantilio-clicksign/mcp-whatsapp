@@ -22,8 +22,13 @@ type AccountLister interface {
 
 // N8NNotifier is the minimal interface the OAuth handler needs to optionally
 // notify n8n that an OAuth flow succeeded.
+//
+// When AccountKey is set, the user is fully ready (single-account login or
+// auto-selected) and n8n should reply with the success message. When the
+// PendingAccounts slice is populated instead, n8n must render an account
+// chooser in WhatsApp — see internal/n8n for the payload shape.
 type N8NNotifier interface {
-	OAuthSuccess(ctx context.Context, phone string, accountKey string) error
+	OAuthSuccess(ctx context.Context, phone, accountKey string, pending []session.PendingAccount) error
 }
 
 type OAuthHandler struct {
@@ -113,9 +118,14 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:    time.Now().UTC(),
 	}
 
-	// Resolve the default account so subsequent tool calls already carry
-	// X-Account-Key. Best-effort: failures are logged but do not block
-	// login — the LLM can recover via the select_account tool.
+	// Resolve the Clicksign accounts the OAuth grant has access to. The
+	// outcome dictates the user-facing flow:
+	//   - 0 accounts (or list failure) → log + proceed; the LLM will hit
+	//     401/403 on the first tool call and the user can re-auth.
+	//   - 1 account                    → auto-select; no friction.
+	//   - 2+ accounts                  → leave AccountKey empty and stash
+	//     the candidates in PendingAccounts so the conversation layer can
+	//     inject a disambiguation preamble + n8n can render a chooser.
 	if h.accounts != nil {
 		acctCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		accounts, accErr := h.accounts.ListOAuth2AccountsWithToken(acctCtx, token.AccessToken)
@@ -130,12 +140,23 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			h.logger.Warn("oauth_callback_no_accounts",
 				slog.String("phone_hash", logging.HashPhone(pending.PhoneNumber)),
 			)
-		default:
+		case len(accounts) == 1:
 			sess.AccountKey = accounts[0].Attributes.Key
-			h.logger.Info("oauth_callback_account_selected",
+			h.logger.Info("oauth_callback_account_auto_selected",
+				slog.String("phone_hash", logging.HashPhone(pending.PhoneNumber)),
+				slog.String("account_name", accounts[0].Attributes.Name),
+			)
+		default:
+			sess.PendingAccounts = make([]session.PendingAccount, 0, len(accounts))
+			for _, a := range accounts {
+				sess.PendingAccounts = append(sess.PendingAccounts, session.PendingAccount{
+					Key:  a.Attributes.Key,
+					Name: a.Attributes.Name,
+				})
+			}
+			h.logger.Info("oauth_callback_pending_account_selection",
 				slog.String("phone_hash", logging.HashPhone(pending.PhoneNumber)),
 				slog.Int("accounts_count", len(accounts)),
-				slog.String("account_name", accounts[0].Attributes.Name),
 			)
 		}
 	}
@@ -154,10 +175,11 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	if h.n8n != nil {
 		accountKey := sess.AccountKey
+		pendingAccounts := append([]session.PendingAccount(nil), sess.PendingAccounts...)
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := h.n8n.OAuthSuccess(ctx, pending.PhoneNumber, accountKey); err != nil {
+			if err := h.n8n.OAuthSuccess(ctx, pending.PhoneNumber, accountKey, pendingAccounts); err != nil {
 				h.logger.Warn("n8n_notify_failed", slog.String("err", err.Error()))
 			}
 		}()

@@ -17,9 +17,25 @@ type Session struct {
 	AccessToken  string     `json:"access_token"`
 	RefreshToken string     `json:"refresh_token"`
 	ExpiresAt    time.Time  `json:"expires_at"`
-	AccountKey   string     `json:"account_key,omitempty"`
-	History      []ChatTurn `json:"history,omitempty"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// AccountKey is the X-Account-Key header sent on every REST call.
+	// Empty when the user has multiple accounts and hasn't picked one yet.
+	AccountKey string `json:"account_key,omitempty"`
+	// PendingAccounts lists the candidate accounts when the user has >1
+	// Clicksign account on the OAuth grant. It is populated by the OAuth
+	// callback and cleared by the select_account tool. While non-empty,
+	// the conversation layer injects a high-priority preamble into the
+	// system prompt so the LLM asks the user to pick one.
+	PendingAccounts []PendingAccount `json:"pending_accounts,omitempty"`
+	History         []ChatTurn       `json:"history,omitempty"`
+	UpdatedAt       time.Time        `json:"updated_at"`
+}
+
+// PendingAccount is a candidate Clicksign account awaiting user selection.
+// We persist only what we need to render the disambiguation prompt: the
+// stable account_key (passed to X-Account-Key) and the display name.
+type PendingAccount struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
 }
 
 // ChatTurn is one persisted message in the conversation history with the

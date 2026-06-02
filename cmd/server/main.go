@@ -100,6 +100,7 @@ func run() error {
 
 	conversation := llm.NewConversation(cfg, logger, store, toolRunner, intentClassifier, metaResponder)
 	notifier := n8n.NewNotifier(logger, cfg.N8NWebhookURL, cfg.N8NWebhookToken)
+	notifier.EnablePayloadLogging(cfg.N8NDebugLogPayload)
 
 	messages := api.NewMessagesHandler(cfg, logger, store, oauthClient, signer, conversation)
 	oauthHandler := api.NewOAuthHandler(cfg, logger, store, oauthClient, signer, notifier, clicksignClient)

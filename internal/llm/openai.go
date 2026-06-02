@@ -68,10 +68,16 @@ func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, err
 
 	// Load prior history (if any). We need it both for classifier context
 	// (to disambiguate short replies like "sim"/"use a conta 3") and to
-	// rehydrate the OpenAI message array later.
-	var priorHistory []session.ChatTurn
+	// rehydrate the OpenAI message array later. We also capture
+	// PendingAccounts so the system prompt can inject a high-priority
+	// preamble asking the user to disambiguate.
+	var (
+		priorHistory    []session.ChatTurn
+		pendingAccounts []session.PendingAccount
+	)
 	if sess, err := c.store.GetSession(ctx, in.Phone); err == nil {
 		priorHistory = sess.History
+		pendingAccounts = sess.PendingAccounts
 	}
 
 	// Intent gate: cheap classifier in front of the main loop. Three
@@ -81,45 +87,60 @@ func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, err
 	//   - off_topic → static OffTopic() reply, no MCP, no LLM
 	// Meta_help and off_topic exchanges are NOT persisted to history,
 	// so the next legitimate message starts from a clean slate.
+	//
+	// Exception: when the session is pending account selection, we MUST
+	// bypass the classifier. The user's reply ("Acme", "a primeira",
+	// raw account key…) often looks off-topic to a stateless classifier
+	// and would be rejected with the canned "só ajudo com envelopes…"
+	// message, leaving the user stuck. The main LLM, with the
+	// AccountSelectionPreamble injected, is the right place to resolve
+	// this reply.
 	recent := classifierContext(priorHistory, c.cfg.ClassifierContextTurns)
-	verdict, vErr := c.classifier.Classify(ctx, in.Message, recent)
-	if vErr != nil {
-		// Fail open: a broken classifier should NOT block legitimate users.
-		c.logger.Warn("classifier_failed_fail_open",
+	if len(pendingAccounts) > 0 {
+		c.logger.Info("classifier_bypassed_pending_account_selection",
 			slog.String("phone_hash", phoneHash),
-			slog.String("err", vErr.Error()),
+			slog.Int("pending_accounts", len(pendingAccounts)),
 		)
 	} else {
-		switch verdict.Intent {
-		case classifier.IntentMetaHelp:
-			c.logger.Info("message_meta_help",
+		verdict, vErr := c.classifier.Classify(ctx, in.Message, recent)
+		if vErr != nil {
+			// Fail open: a broken classifier should NOT block legitimate users.
+			c.logger.Warn("classifier_failed_fail_open",
 				slog.String("phone_hash", phoneHash),
-				slog.String("reason", verdict.Reason),
+				slog.String("err", vErr.Error()),
 			)
-			if c.metaHelp != nil {
-				if reply, err := c.metaHelp.Respond(ctx, in.Phone, in.Message, recent); err == nil {
-					return conv.Output{Reply: reply}, nil
-				} else {
-					// LLM-backed reply failed — log and fall through to the
-					// static template so the user always gets something useful.
-					c.logger.Warn("meta_help_failed_static_fallback",
-						slog.String("phone_hash", phoneHash),
-						slog.String("err", err.Error()),
-					)
+		} else {
+			switch verdict.Intent {
+			case classifier.IntentMetaHelp:
+				c.logger.Info("message_meta_help",
+					slog.String("phone_hash", phoneHash),
+					slog.String("reason", verdict.Reason),
+				)
+				if c.metaHelp != nil {
+					if reply, err := c.metaHelp.Respond(ctx, in.Phone, in.Message, recent); err == nil {
+						return conv.Output{Reply: reply}, nil
+					} else {
+						// LLM-backed reply failed — log and fall through to the
+						// static template so the user always gets something useful.
+						c.logger.Warn("meta_help_failed_static_fallback",
+							slog.String("phone_hash", phoneHash),
+							slog.String("err", err.Error()),
+						)
+					}
 				}
+				return conv.Output{Reply: Capabilities()}, nil
+			case classifier.IntentOffTopic:
+				c.logger.Info("message_off_topic",
+					slog.String("phone_hash", phoneHash),
+					slog.String("reason", verdict.Reason),
+				)
+				return conv.Output{Reply: OffTopic()}, nil
+			default:
+				c.logger.Debug("message_on_topic",
+					slog.String("phone_hash", phoneHash),
+					slog.String("reason", verdict.Reason),
+				)
 			}
-			return conv.Output{Reply: Capabilities()}, nil
-		case classifier.IntentOffTopic:
-			c.logger.Info("message_off_topic",
-				slog.String("phone_hash", phoneHash),
-				slog.String("reason", verdict.Reason),
-			)
-			return conv.Output{Reply: OffTopic()}, nil
-		default:
-			c.logger.Debug("message_on_topic",
-				slog.String("phone_hash", phoneHash),
-				slog.String("reason", verdict.Reason),
-			)
 		}
 	}
 
@@ -150,9 +171,16 @@ func (c *Conversation) Run(ctx context.Context, in conv.Input) (conv.Output, err
 	}
 
 	// priorHistory was loaded above for the classifier; reuse it now to
-	// rehydrate the OpenAI message array.
+	// rehydrate the OpenAI message array. The system prompt is prefixed
+	// with a pending-account preamble whenever the session is waiting on
+	// the user to pick a Clicksign account — this overrides whatever the
+	// user typed and forces a select_account call before any other tool.
+	systemMsg := SystemPrompt()
+	if preamble := AccountSelectionPreamble(pendingAccounts); preamble != "" {
+		systemMsg = preamble + "\n\n" + systemMsg
+	}
 	messages := []openai.ChatCompletionMessageParamUnion{
-		openai.SystemMessage(SystemPrompt()),
+		openai.SystemMessage(systemMsg),
 	}
 	for _, t := range priorHistory {
 		messages = append(messages, toOpenAIMessage(t))

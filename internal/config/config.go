@@ -56,8 +56,15 @@ type Config struct {
 	MetaHelpTimeoutSeconds int    `mapstructure:"meta_help_timeout_seconds"`
 
 	// n8n callback
-	N8NWebhookURL   string `mapstructure:"n8n_webhook_url"`
-	N8NWebhookToken string `mapstructure:"n8n_webhook_token"`
+	N8NWebhookURL        string `mapstructure:"n8n_webhook_url"`
+	N8NWebhookToken      string `mapstructure:"n8n_webhook_token"`
+	// N8NDebugLogPayload, when true, makes the Notifier emit a structured
+	// log with the full request body (event, phone_hash, reply length and
+	// metadata) right before sending. Off by default — turn on temporarily
+	// to inspect what n8n is actually receiving. Never enable in
+	// environments where logs are forwarded to less-trusted sinks: the
+	// metadata may include account keys.
+	N8NDebugLogPayload   bool   `mapstructure:"n8n_debug_log_payload"`
 
 	// Storage
 	SessionBackend     string `mapstructure:"session_backend"`
@@ -127,6 +134,7 @@ func Load() (*Config, error) {
 	v.SetDefault("meta_help_enabled", true)
 	v.SetDefault("meta_help_model", "gpt-4o-mini")
 	v.SetDefault("meta_help_timeout_seconds", 10)
+	v.SetDefault("n8n_debug_log_payload", false)
 	v.SetDefault("session_backend", "memory")
 	v.SetDefault("dynamodb_table_name", "whatsapp_mcp_sessions")
 	v.SetDefault("aws_region", "us-east-1")
@@ -141,7 +149,7 @@ func Load() (*Config, error) {
 		"openai_api_key", "openai_model", "openai_max_tool_iterations", "openai_timeout_seconds",
 		"classifier_enabled", "classifier_model", "classifier_timeout_seconds", "classifier_cache_ttl_seconds", "classifier_context_turns",
 		"meta_help_enabled", "meta_help_model", "meta_help_timeout_seconds",
-		"n8n_webhook_url", "n8n_webhook_token",
+		"n8n_webhook_url", "n8n_webhook_token", "n8n_debug_log_payload",
 		"session_backend", "dynamodb_table_name", "dynamodb_endpoint", "aws_region",
 	} {
 		_ = v.BindEnv(key, strings.ToUpper(key))

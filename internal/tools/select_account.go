@@ -8,7 +8,17 @@ import (
 	"time"
 
 	"github.com/clicksign/whatsapp-mcp/internal/clicksign"
+	"github.com/clicksign/whatsapp-mcp/internal/session"
 )
+
+func containsAccount(accounts []session.PendingAccount, key string) bool {
+	for _, a := range accounts {
+		if a.Key == key {
+			return true
+		}
+	}
+	return false
+}
 
 func selectAccountTool(d CatalogDeps) Tool {
 	return Tool{
@@ -36,7 +46,17 @@ func selectAccountTool(d CatalogDeps) Tool {
 			if err != nil {
 				return "", clicksign.ErrAuthExpired
 			}
+			// When the session has a pending list, reject keys that are
+			// not in it: this protects against LLM hallucinations that
+			// would silently set an invalid X-Account-Key and cause
+			// confusing 403s on the next call.
+			if len(sess.PendingAccounts) > 0 {
+				if !containsAccount(sess.PendingAccounts, key) {
+					return "", fmt.Errorf("account_key %q is not in the pending selection list", key)
+				}
+			}
 			sess.AccountKey = key
+			sess.PendingAccounts = nil
 			sess.UpdatedAt = time.Now().UTC()
 			if err := d.Store.PutSession(ctx, sess); err != nil {
 				return "", fmt.Errorf("persist session: %w", err)
