@@ -10,9 +10,18 @@ import (
 )
 
 const (
-	bulkResourceType      = "envelope_bulk_creations"
+	// bulkResourceType is the JSON:API `data.type` value the Clicksign API
+	// expects in POST /envelope_bulk_creations payloads. Note the discrepancy
+	// with the URL path (envelope_bulk_creations, snake_case + plural): the
+	// resource type is hyphenated and singular per JSON:API conventions.
+	bulkResourceType      = "envelope-bulk-creation"
 	defaultRemindInterval = 3
 	defaultLocale         = "pt-BR"
+
+	// defaultMetadataSource / defaultMetadataOrigin populate the mandatory
+	// metadata object the API rejects payloads without.
+	defaultMetadataSource = "api"
+	defaultMetadataOrigin = "whatsapp-mcp"
 )
 
 // buildBulkRequestFromTemplate decodes the LLM-provided args into an
@@ -68,9 +77,8 @@ func buildBulkRequestFromFile(args map[string]any, fileBytes []byte, mime, deriv
 		Filename:      filename,
 		ContentBase64: dataURI,
 	}
-	if meta, ok := docArgs["metadata"].(map[string]any); ok {
-		doc.Metadata = meta
-	}
+	rawDocMeta, _ := docArgs["metadata"].(map[string]any)
+	doc.Metadata = ensureSourceMetadata(rawDocMeta)
 
 	signers, err := parseSigners(args)
 	if err != nil {
@@ -109,9 +117,8 @@ func parseEnvelope(args map[string]any) (clicksign.BulkEnvelope, error) {
 	if v, ok := raw["remind_interval"].(float64); ok && v > 0 {
 		env.RemindInterval = int(v)
 	}
-	if meta, ok := raw["metadata"].(map[string]any); ok {
-		env.Metadata = meta
-	}
+	rawMeta, _ := raw["metadata"].(map[string]any)
+	env.Metadata = ensureSourceMetadata(rawMeta)
 	return env, nil
 }
 
@@ -142,9 +149,8 @@ func parseTemplateDocument(args map[string]any) (clicksign.BulkDocument, error) 
 		Filename: filename,
 		Template: &clicksign.BulkTemplate{Key: key, Data: data},
 	}
-	if meta, ok := raw["metadata"].(map[string]any); ok {
-		doc.Metadata = meta
-	}
+	rawMeta, _ := raw["metadata"].(map[string]any)
+	doc.Metadata = ensureSourceMetadata(rawMeta)
 	return doc, nil
 }
 
@@ -227,4 +233,22 @@ func getBool(m map[string]any, key string, def bool) bool {
 		return def
 	}
 	return v
+}
+
+// ensureSourceMetadata mirrors the MCP server's EnsureSourceInMetadata: the
+// Clicksign API rejects bulk-creation payloads without a metadata object
+// carrying at least `source` and `origin`. We always emit a non-nil map so
+// the JSON encoder produces `"metadata": {...}` (never omits the field).
+func ensureSourceMetadata(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in)+2)
+	for k, v := range in {
+		out[k] = v
+	}
+	if s, _ := out["source"].(string); strings.TrimSpace(s) == "" {
+		out["source"] = defaultMetadataSource
+	}
+	if o, _ := out["origin"].(string); strings.TrimSpace(o) == "" {
+		out["origin"] = defaultMetadataOrigin
+	}
+	return out
 }

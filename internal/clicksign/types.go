@@ -89,16 +89,20 @@ type BulkEnvelope struct {
 	AutoClose         bool           `json:"auto_close"`
 	RemindInterval    int            `json:"remind_interval"`
 	BlockAfterRefusal bool           `json:"block_after_refusal"`
-	Metadata          map[string]any `json:"metadata,omitempty"`
+	// Metadata is required by the Clicksign API (it must be present with
+	// at least `source` and `origin`). The builder layer is responsible
+	// for filling defaults so we always emit a non-empty object.
+	Metadata map[string]any `json:"metadata"`
 }
 
 // BulkDocument is the document attached to the envelope. Either Template OR
 // ContentBase64 must be populated (the API rejects payloads with both).
 type BulkDocument struct {
-	Template      *BulkTemplate  `json:"template,omitempty"`
-	ContentBase64 string         `json:"content_base64,omitempty"`
-	Filename      string         `json:"filename"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
+	Template      *BulkTemplate `json:"template,omitempty"`
+	ContentBase64 string        `json:"content_base64,omitempty"`
+	Filename      string        `json:"filename"`
+	// Metadata is required by the Clicksign API (see BulkEnvelope.Metadata).
+	Metadata map[string]any `json:"metadata"`
 }
 
 type BulkTemplate struct {

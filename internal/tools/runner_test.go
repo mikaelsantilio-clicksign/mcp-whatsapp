@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -62,8 +63,10 @@ func TestBuildBulkRequestFromTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildBulkRequestFromTemplate: %v", err)
 	}
-	if req.Data.Type != bulkResourceType {
-		t.Errorf("data.type=%q", req.Data.Type)
+	// Bug regression: data.type must be the hyphenated, singular JSON:API
+	// resource type — NOT the URL path's snake_case plural.
+	if req.Data.Type != "envelope-bulk-creation" {
+		t.Errorf("data.type=%q (want envelope-bulk-creation)", req.Data.Type)
 	}
 	attrs := req.Data.Attributes
 	if attrs.Envelope.Name != "Contract" || attrs.Envelope.RemindInterval != 5 {
@@ -85,9 +88,57 @@ func TestBuildBulkRequestFromTemplate(t *testing.T) {
 		t.Errorf("notifications.message=%q", attrs.Notifications.Message)
 	}
 
-	// JSON round-trip smoke test
-	if _, err := json.Marshal(req); err != nil {
+	// Bug regression: metadata must be present (non-nil) on both envelope
+	// and document, with the default source/origin defaults filled in.
+	if attrs.Envelope.Metadata == nil {
+		t.Fatal("envelope.metadata must not be nil")
+	}
+	if got := attrs.Envelope.Metadata["source"]; got != "api" {
+		t.Errorf("envelope.metadata.source=%v (want api)", got)
+	}
+	if got := attrs.Envelope.Metadata["origin"]; got != "whatsapp-mcp" {
+		t.Errorf("envelope.metadata.origin=%v (want whatsapp-mcp)", got)
+	}
+	if attrs.Document.Metadata == nil {
+		t.Fatal("document.metadata must not be nil")
+	}
+	if got := attrs.Document.Metadata["source"]; got != "api" {
+		t.Errorf("document.metadata.source=%v (want api)", got)
+	}
+
+	// JSON round-trip smoke test: verify the encoded body carries both
+	// `metadata` keys (not omitted) and the singular type.
+	raw, err := json.Marshal(req)
+	if err != nil {
 		t.Fatalf("json.Marshal req: %v", err)
+	}
+	body := string(raw)
+	if !strings.Contains(body, `"type":"envelope-bulk-creation"`) {
+		t.Errorf("encoded body missing singular type, got: %s", body)
+	}
+	if !strings.Contains(body, `"metadata":{`) {
+		t.Errorf("encoded body missing metadata object, got: %s", body)
+	}
+}
+
+func TestEnsureSourceMetadata_FillsDefaultsAndPreservesExtras(t *testing.T) {
+	out := ensureSourceMetadata(nil)
+	if out["source"] != "api" || out["origin"] != "whatsapp-mcp" {
+		t.Errorf("defaults missing: %+v", out)
+	}
+
+	out = ensureSourceMetadata(map[string]any{
+		"source": "external-system",
+		"extra":  "kept",
+	})
+	if out["source"] != "external-system" {
+		t.Errorf("source should not be overwritten when present: %+v", out)
+	}
+	if out["origin"] != "whatsapp-mcp" {
+		t.Errorf("origin default missing: %+v", out)
+	}
+	if out["extra"] != "kept" {
+		t.Errorf("extra keys were dropped: %+v", out)
 	}
 }
 
