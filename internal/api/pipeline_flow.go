@@ -17,6 +17,14 @@ import (
 	"github.com/clicksign/whatsapp-mcp/internal/session"
 )
 
+// activeFlowTTL bounds how long the pipeline keeps trusting a stale
+// ActiveFlow before treating it as abandoned. 10 minutes is generous
+// enough for any reasonable interactive flow (user reads, types, clicks)
+// and short enough that the user doesn't expect the bot to "remember"
+// across a meal break. Only applies to free-text turns; an explicit
+// click is always respected, regardless of age.
+const activeFlowTTL = 10 * time.Minute
+
 // FlowPipeline implements the Option B request pipeline:
 //
 //	classifier (intent gate) → NLU (intent + entities) → router (flows)
@@ -140,6 +148,19 @@ func (p *FlowPipeline) runWithText(
 	sess *session.Session,
 	phoneHash string,
 ) (MessageResponse, error) {
+	// Expire stale active flows so the user is never permanently stuck
+	// in a flow they walked away from. Cliques (handled by
+	// runWithInteractive) ignore the TTL on purpose: if the user is
+	// actually clicking, the state is by definition still relevant.
+	if sess.ActiveFlow != nil && time.Since(sess.ActiveFlow.AskedAt) > activeFlowTTL {
+		p.logger.Info("active_flow_expired",
+			slog.String("phone_hash", phoneHash),
+			slog.String("flow_id", sess.ActiveFlow.FlowID),
+			slog.String("age", time.Since(sess.ActiveFlow.AskedAt).String()),
+		)
+		sess.ActiveFlow = nil
+	}
+
 	recent := historyForNLU(sess.History, 4)
 	verdict, err := p.nluExt.Extract(ctx, req.Message, recent)
 	if err != nil {
