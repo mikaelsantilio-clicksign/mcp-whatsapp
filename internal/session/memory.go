@@ -11,10 +11,10 @@ import (
 type MemoryStore struct {
 	mu sync.RWMutex
 
-	sessions      map[string]*Session // key: phone_number
-	pendingState  map[string]*Pending // key: state
-	pendingLink   map[string]*Pending // key: link_token
-	clientReg     *ClientRegistration
+	sessions     map[string]*Session // key: phone_number
+	pendingState map[string]*Pending // key: state
+	pendingLink  map[string]*Pending // key: link_token
+	clientReg    *ClientRegistration
 }
 
 func NewMemoryStore() *MemoryStore {

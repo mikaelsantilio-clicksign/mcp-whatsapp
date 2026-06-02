@@ -30,10 +30,10 @@ type OpenAIClassifier struct {
 
 // OpenAIConfig groups the inputs needed to build an OpenAIClassifier.
 type OpenAIConfig struct {
-	APIKey         string
-	Model          string        // e.g. "gpt-4o-mini"
-	Timeout        time.Duration // per call
-	CacheTTL       time.Duration // verdict cache TTL
+	APIKey   string
+	Model    string        // e.g. "gpt-4o-mini"
+	Timeout  time.Duration // per call
+	CacheTTL time.Duration // verdict cache TTL
 }
 
 func NewOpenAI(logger *slog.Logger, cfg OpenAIConfig) *OpenAIClassifier {

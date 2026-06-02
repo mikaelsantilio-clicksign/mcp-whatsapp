@@ -18,10 +18,10 @@ import (
 // State machine (same shape as CreateEnvelopePDFFlow so the user "feels"
 // a consistent UX):
 //
-//   1. gathering — collect envelope_name, template_id and signers. The
-//      template can be supplied by NLU as template_id or by hopping out
-//      to list_templates with return_to=create_envelope_tmpl.
-//   2. awaiting_confirm — render snapshot, wait for confirm_yes/no.
+//  1. gathering — collect envelope_name, template_id and signers. The
+//     template can be supplied by NLU as template_id or by hopping out
+//     to list_templates with return_to=create_envelope_tmpl.
+//  2. awaiting_confirm — render snapshot, wait for confirm_yes/no.
 //
 // Template variables (the `data` map for filling placeholders) are out
 // of scope for the MVP — we send an empty map and Clicksign uses default

@@ -8,12 +8,12 @@ import (
 
 func TestDeriveFilenameFromURL(t *testing.T) {
 	cases := map[string]string{
-		"https://x.com/contrato.pdf":               "contrato.pdf",
-		"https://x.com/pasta/Recibo%20Final.docx":  "Recibo Final.docx",
-		"https://x.com/no-extension":               "",
-		"https://x.com/cake.zip":                   "",
-		"":                                         "",
-		"https://x.com/":                           "",
+		"https://x.com/contrato.pdf":              "contrato.pdf",
+		"https://x.com/pasta/Recibo%20Final.docx": "Recibo Final.docx",
+		"https://x.com/no-extension":              "",
+		"https://x.com/cake.zip":                  "",
+		"":                                        "",
+		"https://x.com/":                          "",
 	}
 	for in, want := range cases {
 		if got := DeriveFilenameFromURL(in); got != want {

@@ -19,15 +19,16 @@ import (
 	"github.com/clicksign/whatsapp-mcp/internal/session"
 )
 
+// MessagesHandler serves POST /api/messages — the single inbound
+// endpoint from n8n. It always delegates the heavy lifting to the
+// FlowPipeline (Option B); the legacy MCP/LLM conversation pipeline
+// was removed in Phase 5.
 type MessagesHandler struct {
 	cfg          *config.Config
 	logger       *slog.Logger
 	store        session.Store
 	oauth        *oauth.Client
 	signer       *oauth.StateSigner
-	conversation conv.Conversation
-	// flowPipeline is set when cfg.PipelineFlow() returns true. When nil,
-	// the handler falls back to the legacy conversation pipeline.
 	flowPipeline *FlowPipeline
 	idempotency  *idempotencyCache
 }
@@ -38,7 +39,6 @@ func NewMessagesHandler(
 	store session.Store,
 	oauthClient *oauth.Client,
 	signer *oauth.StateSigner,
-	conversation conv.Conversation,
 	flowPipeline *FlowPipeline,
 ) *MessagesHandler {
 	return &MessagesHandler{
@@ -47,12 +47,14 @@ func NewMessagesHandler(
 		store:        store,
 		oauth:        oauthClient,
 		signer:       signer,
-		conversation: conversation,
 		flowPipeline: flowPipeline,
 		idempotency:  newIdempotencyCache(60 * time.Second),
 	}
 }
 
+// Attachment is the wire-format attachment item in the inbound payload.
+// Kept distinct from flow.Attachment so the HTTP layer can evolve
+// independently of the flow contract.
 type Attachment struct {
 	URL      string `json:"url"`
 	MimeType string `json:"mime_type,omitempty"`
@@ -60,7 +62,7 @@ type Attachment struct {
 }
 
 // MessageRequest is the inbound payload from n8n. Either Message or
-// InteractiveReply must be present (a clique-only turn omits Message).
+// InteractiveReply must be present (a click-only turn omits Message).
 // See docs/N8N_INTEGRATION_CONTRACT.md for full details.
 type MessageRequest struct {
 	PhoneNumber      string                 `json:"phone_number"`
@@ -107,6 +109,9 @@ func (h *MessagesHandler) Post(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	phoneHash := logging.HashPhone(req.PhoneNumber)
 
+	// Idempotency: WhatsApp + n8n can deliver the same wamid more than
+	// once on retries. We keep a 60s in-memory dedup window so the
+	// flow side never runs the same envelope creation twice in a row.
 	if req.MessageID != "" && h.idempotency.SeenRecently(req.MessageID) {
 		h.logger.Info("message_duplicate_skipped",
 			slog.String("phone_hash", phoneHash),
@@ -140,65 +145,18 @@ func (h *MessagesHandler) Post(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pipeline switch (Option B). When PIPELINE=flow we delegate to the
-	// NLU + Guided Flow pipeline; otherwise we keep the legacy MCP +
-	// LLM tool-calling path live so the migration is reversible.
-	if h.cfg.PipelineFlow() && h.flowPipeline != nil {
-		h.runFlowPipeline(ctx, w, req, sess, phoneHash)
-		return
-	}
-
-	// Legacy path.
-	if h.conversation == nil {
-		writeJSON(w, http.StatusOK, MessageResponse{
-			Status: "ok",
-			Reply:  fmt.Sprintf("(stub) Sessão encontrada para você. Mensagem: %q", req.Message),
-		})
-		_ = sess
-		return
-	}
-
-	out, err := h.conversation.Run(ctx, conv.Input{
-		Phone:       req.PhoneNumber,
-		Message:     req.Message,
-		Attachments: convertAttachments(req.Attachments),
-	})
-	if err != nil {
-		if errors.Is(err, conv.ErrSessionExpired) {
-			h.respondNeedsAuth(ctx, w, req.PhoneNumber, llm.SessionExpired)
-			return
-		}
-		h.logger.Error("conversation_failed",
-			slog.String("err", err.Error()),
-			slog.String("phone_hash", phoneHash),
-		)
-		writeJSON(w, http.StatusOK, MessageResponse{
+	if h.flowPipeline == nil {
+		// Defensive: a misconfigured boot would leave us without a
+		// pipeline. Better surface a clear error than silently 200.
+		h.logger.Error("flow_pipeline_missing", slog.String("phone_hash", phoneHash))
+		writeJSON(w, http.StatusInternalServerError, MessageResponse{
 			Status: "error",
-			Reply:  llm.UpstreamTimeout(),
-			Error:  &errorBody{Code: "UPSTREAM_TIMEOUT", Details: err.Error()},
+			Reply:  llm.InternalError(),
+			Error:  &errorBody{Code: "INTERNAL_ERROR", Details: "flow pipeline not initialised"},
 		})
 		return
 	}
-	traces := make([]ToolCallTrace, 0, len(out.ToolCalls))
-	for _, t := range out.ToolCalls {
-		traces = append(traces, ToolCallTrace{Name: t.Name, OK: t.OK, Err: t.Err})
-	}
-	writeJSON(w, http.StatusOK, MessageResponse{
-		Status:    "ok",
-		Reply:     out.Reply,
-		ToolCalls: traces,
-	})
-}
 
-// runFlowPipeline invokes the Option B pipeline (NLU + Guided Flow) and
-// writes the resulting MessageResponse.
-func (h *MessagesHandler) runFlowPipeline(
-	ctx context.Context,
-	w http.ResponseWriter,
-	req MessageRequest,
-	sess *session.Session,
-	phoneHash string,
-) {
 	resp, err := h.flowPipeline.Run(ctx, req, sess)
 	if err != nil {
 		if errors.Is(err, conv.ErrSessionExpired) {
@@ -217,17 +175,6 @@ func (h *MessagesHandler) runFlowPipeline(
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-func convertAttachments(in []Attachment) []conv.Attachment {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]conv.Attachment, 0, len(in))
-	for _, a := range in {
-		out = append(out, conv.Attachment{URL: a.URL, MimeType: a.MimeType, Filename: a.Filename})
-	}
-	return out
 }
 
 func (h *MessagesHandler) respondNeedsAuth(ctx context.Context, w http.ResponseWriter, phone string, replyBuilder func(string) string) {
@@ -278,8 +225,9 @@ func (h *MessagesHandler) respondNeedsAuth(ctx context.Context, w http.ResponseW
 }
 
 // resolveOAuthClientID picks the right client_id depending on the OAuth
-// mode. In direct mode the value comes from config (a pre-registered
-// confidential client). In MCP/legacy mode we fetch the DCR record.
+// mode. In direct mode (default since Phase 3+) the value comes from
+// config; in legacy MCP mode it comes from the DCR record persisted at
+// bootstrap.
 func (h *MessagesHandler) resolveOAuthClientID(ctx context.Context) (string, error) {
 	if h.cfg.OAuthDirect() {
 		id := strings.TrimSpace(h.cfg.OAuthClientID)
@@ -303,4 +251,3 @@ func (h *MessagesHandler) internalError(w http.ResponseWriter, err error) {
 		Error:  &errorBody{Code: "INTERNAL_ERROR"},
 	})
 }
-

@@ -19,9 +19,7 @@ import (
 	"github.com/clicksign/whatsapp-mcp/internal/clicksign"
 	"github.com/clicksign/whatsapp-mcp/internal/config"
 	"github.com/clicksign/whatsapp-mcp/internal/flow"
-	"github.com/clicksign/whatsapp-mcp/internal/llm"
 	"github.com/clicksign/whatsapp-mcp/internal/logging"
-	"github.com/clicksign/whatsapp-mcp/internal/mcpclient"
 	"github.com/clicksign/whatsapp-mcp/internal/n8n"
 	"github.com/clicksign/whatsapp-mcp/internal/nlu"
 	"github.com/clicksign/whatsapp-mcp/internal/oauth"
@@ -78,8 +76,6 @@ func run() error {
 		}
 	}
 
-	mcpManager := mcpclient.NewManager(cfg, logger, store, oauthClient)
-
 	var intentClassifier classifier.Classifier = classifier.AlwaysOnTopic{}
 	if cfg.ClassifierEnabled {
 		intentClassifier = classifier.NewOpenAI(logger, classifier.OpenAIConfig{
@@ -93,33 +89,18 @@ func run() error {
 			slog.Int("context_turns", cfg.ClassifierContextTurns),
 		)
 	} else {
-		logger.Warn("classifier_disabled_all_messages_billed_to_main_llm")
+		logger.Warn("classifier_disabled")
 	}
 
-	var metaResponder *llm.MetaHelpResponder
-	if cfg.MetaHelpEnabled {
-		metaResponder = llm.NewMetaHelpResponder(cfg, logger, mcpManager)
-		logger.Info("meta_help_enabled",
-			slog.String("model", cfg.MetaHelpModel),
-		)
-	} else {
-		logger.Info("meta_help_disabled_using_static_capabilities")
-	}
-
-	conversation := llm.NewConversation(cfg, logger, store, mcpManager, intentClassifier, metaResponder)
 	notifier := n8n.NewNotifier(logger, cfg.N8NWebhookURL, cfg.N8NWebhookToken)
 
-	// Option B pipeline wiring. Built unconditionally so we can flip the
-	// PIPELINE flag at runtime without rebuilding; the messages_handler
-	// uses cfg.PipelineFlow() to choose between legacy and flow.
 	flowPipeline := buildFlowPipeline(cfg, logger, store, oauthClient, intentClassifier)
 	logger.Info("flow_pipeline_built",
-		slog.Bool("active", cfg.PipelineFlow()),
 		slog.String("clicksign_base_url", cfg.ClicksignAPIBaseURL),
 		slog.String("nlu_model", cfg.NLUModel),
 	)
 
-	messages := api.NewMessagesHandler(cfg, logger, store, oauthClient, signer, conversation, flowPipeline)
+	messages := api.NewMessagesHandler(cfg, logger, store, oauthClient, signer, flowPipeline)
 	oauthHandler := api.NewOAuthHandler(cfg, logger, store, oauthClient, signer, notifier)
 	health := api.NewHealthHandler(cfg)
 
@@ -155,7 +136,6 @@ func run() error {
 		logger.Info("server_starting",
 			slog.String("addr", addr),
 			slog.String("redirect_uri", cfg.RedirectURI()),
-			slog.String("mcp_endpoint", cfg.MCPEndpointURL()),
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
@@ -204,7 +184,7 @@ func bootstrapOAuthClient(
 		slog.String("registration_endpoint", md.RegistrationEndpoint),
 	)
 
-	reg, err := client.RegisterDynamic(ctx, cfg.RedirectURI(), cfg.MCPOAuthScopes)
+	reg, err := client.RegisterDynamic(ctx, cfg.RedirectURI(), cfg.OAuthScopesOrDefault())
 	if err != nil {
 		return fmt.Errorf("dcr: %w", err)
 	}

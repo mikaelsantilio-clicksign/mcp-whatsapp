@@ -17,18 +17,18 @@ import (
 )
 
 const (
-	EventOAuthSuccess    = "oauth_success"
-	EventOAuthFailed     = "oauth_failed"
-	EventSessionExpired  = "session_expired"
+	EventOAuthSuccess   = "oauth_success"
+	EventOAuthFailed    = "oauth_failed"
+	EventSessionExpired = "session_expired"
 )
 
 // Notifier pushes proactive messages to n8n. When the webhook URL is unset
 // every call becomes a no-op so the rest of the system keeps working.
 type Notifier struct {
-	logger   *slog.Logger
-	url      string
-	token    string
-	http     *http.Client
+	logger *slog.Logger
+	url    string
+	token  string
+	http   *http.Client
 }
 
 func NewNotifier(logger *slog.Logger, url, token string) *Notifier {
@@ -114,4 +114,3 @@ func (n *Notifier) debugSkip(body payload) {
 		slog.String("phone_hash", logging.HashPhone(body.PhoneNumber)),
 	)
 }
-

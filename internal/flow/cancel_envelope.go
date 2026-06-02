@@ -22,7 +22,7 @@ import (
 //  1. gathering           — collect envelope (id or name).
 //  2. awaiting_choice     — disambiguate when name matches several rows.
 //  3. awaiting_confirm    — destructive action requires an explicit
-//                           "Sim, excluir" button click.
+//     "Sim, excluir" button click.
 //
 // We persist only "envelope_id" and "envelope_name" in FlowState.Data.
 type CancelEnvelopeFlow struct {

@@ -15,13 +15,13 @@ import (
 // existing envelope. The conversation has up to three visible steps:
 //
 //  1. gathering          — collect envelope (id or name) + signer fields.
-//                          Each turn merges new entities with what we
-//                          already have.
+//     Each turn merges new entities with what we
+//     already have.
 //  2. awaiting_choice    — the user typed an envelope name that matched
-//                          more than one row; we render a list to pick.
+//     more than one row; we render a list to pick.
 //  3. awaiting_confirm   — show a snapshot and ask "Confirmar?" with
-//                          quick-reply buttons. Confirmation triggers
-//                          POST /envelopes/{id}/signers.
+//     quick-reply buttons. Confirmation triggers
+//     POST /envelopes/{id}/signers.
 //
 // We persist only what we need in FlowState.Data:
 //   - "envelope_id"   (string)
@@ -38,9 +38,9 @@ func NewAddSignerFlow(cs *clicksign.Client) *AddSignerFlow {
 func (f *AddSignerFlow) ID() string { return "add_signer" }
 
 const (
-	stepGatheringAddSigner       = "gathering"
+	stepGatheringAddSigner        = "gathering"
 	stepAwaitingEnvelopeAddSigner = "awaiting_envelope_choice"
-	stepConfirmAddSigner         = "awaiting_confirm"
+	stepConfirmAddSigner          = "awaiting_confirm"
 )
 
 func (f *AddSignerFlow) Handle(ctx context.Context, in Input) (Result, error) {

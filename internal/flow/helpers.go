@@ -106,13 +106,13 @@ func formatShortDate(s string) string {
 // pt-BR labels we surface to the user. We default to the raw value when
 // the API ever returns something unexpected (forward-compatible).
 var envelopeStatusLabels = map[string]string{
-	"pending":  "Pendente",
-	"running":  "Em andamento",
-	"closed":   "Concluído",
-	"canceled": "Cancelado",
+	"pending":   "Pendente",
+	"running":   "Em andamento",
+	"closed":    "Concluído",
+	"canceled":  "Cancelado",
 	"cancelled": "Cancelado",
-	"expired":  "Expirado",
-	"draft":    "Rascunho",
+	"expired":   "Expirado",
+	"draft":     "Rascunho",
 }
 
 // envelopeStatusLabel returns the pt-BR label for a raw envelope status.

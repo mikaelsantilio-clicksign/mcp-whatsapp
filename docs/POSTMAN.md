@@ -1,10 +1,13 @@
 # Simulando uma conversa de WhatsApp — cURL + Postman
 
-Este documento mostra como simular o fluxo completo do `whatsapp-mcp` como se você fosse o n8n encaminhando mensagens do WhatsApp. Inclui:
+Este documento mostra como simular o fluxo completo do `whatsapp-mcp` como se você fosse o n8n encaminhando mensagens do WhatsApp. Cobre o pipeline **NLU + Guided Flow (Option B)**, que é o único pipeline ativo desde a Fase 5.
 
-- comandos `curl` prontos para copiar/colar
+Material disponível:
+
+- comandos `curl` prontos para copiar/colar (abaixo)
 - collection do Postman: [`whatsapp-mcp.postman_collection.json`](./whatsapp-mcp.postman_collection.json)
 - environment do Postman: [`whatsapp-mcp.postman_environment.json`](./whatsapp-mcp.postman_environment.json)
+- contrato com o time de n8n: [`N8N_INTEGRATION_CONTRACT.md`](./N8N_INTEGRATION_CONTRACT.md)
 
 ---
 
@@ -25,9 +28,33 @@ export PHONE="+5511999999999"
 1. **Importar a collection**: Postman → Import → arraste `docs/whatsapp-mcp.postman_collection.json`
 2. **Importar o environment**: Postman → Import → arraste `docs/whatsapp-mcp.postman_environment.json`
 3. No canto superior direito, selecione o environment **whatsapp-mcp (local)** e preencha `api_token` com o valor do seu `.env`
-4. Rode as requests na ordem dos folders (1 → 5)
+4. Rode as requests na ordem dos folders (0 → 4)
 
 A collection já tem **scripts de teste** que capturam o `authorize_url` e o `short_link` automaticamente do primeiro `needs_auth` e salvam no environment, então as requests seguintes não precisam de copy/paste manual.
+
+---
+
+## Resposta padrão
+
+Todas as respostas de `/api/messages` têm o shape unificado abaixo (campos opcionais omitidos quando vazios):
+
+```jsonc
+{
+  "status": "ok | needs_auth | error",
+  "reply": "texto a renderizar no WhatsApp",
+  "authorize_url": "https://… (só em needs_auth)",
+  "interactive": {
+    "type": "list | buttons",
+    "header": "…", "body": "…", "footer": "…",
+    "items": [{ "id": "…", "title": "…", "description": "…" }]
+  },
+  "flow_state": { "flow_id": "create_envelope_pdf", "step": "awaiting_confirm" },
+  "trace": [{ "step": "…", "ok": true, "info": "…" }],
+  "error": { "code": "INTERNAL_ERROR", "details": "…" }
+}
+```
+
+Veja `docs/N8N_INTEGRATION_CONTRACT.md` para o detalhamento exato de cada campo e como o n8n deve renderizar listas e botões.
 
 ---
 
@@ -39,15 +66,11 @@ A collection já tem **scripts de teste** que capturam o `authorize_url` e o `sh
 curl -s "$BASE_URL/healthz"
 ```
 
-Resposta:
-
 ```json
 {"status":"ok","version":"0.1.0"}
 ```
 
-### 1. Primeira mensagem do usuário (não autenticado) → `needs_auth`
-
-Simula o n8n encaminhando "olá" pela primeira vez:
+### 1. Primeira mensagem (não autenticado) → `needs_auth`
 
 ```bash
 curl -s -X POST "$BASE_URL/api/messages" \
@@ -60,50 +83,38 @@ curl -s -X POST "$BASE_URL/api/messages" \
   }'
 ```
 
-Resposta esperada:
-
 ```json
 {
   "status": "needs_auth",
-  "reply": "Olá! Para eu poder te ajudar com seus envelopes da Clicksign, primeiro preciso que você conecte sua conta…\n\n👉 http://localhost:8080/c/QKGP4BECQDPMU\n\nO link expira em 5 minutos e é só seu — evite compartilhar.",
-  "authorize_url": "https://mcp-api-tavola-v3-6.clicksign.dev/oauth2/authorize?…"
+  "reply": "Olá! Para eu poder te ajudar com seus envelopes da Clicksign…\n\n👉 http://localhost:8080/c/QKGP4BECQDPMU\n\nO link expira em 5 minutos e é só seu — evite compartilhar.",
+  "authorize_url": "https://oauth2.clicksign.dev/login?response_type=code&client_id=…&redirect_uri=…&code_challenge=…&scope=openid+email+phone"
 }
 ```
 
-**O n8n enviaria o conteúdo de `reply` direto pro WhatsApp.**
-
-Guarde o `authorize_url` (ou o shortlink) — você vai usar no próximo passo.
+O `authorize_url` agora aponta direto para o Cognito da Clicksign (modo `OAUTH_MODE=direct`). O n8n manda o `reply` no WhatsApp.
 
 ### 2. Usuário "clica" no shortlink
 
-Isso é normalmente o browser do usuário, mas você pode reproduzir no terminal:
-
 ```bash
-SHORTLINK="http://localhost:8080/c/QKGP4BECQDPMU"   # cole o link recebido
+SHORTLINK="http://localhost:8080/c/QKGP4BECQDPMU"
 curl -i "$SHORTLINK"
 ```
 
-Resposta esperada (302):
-
-```http
+```
 HTTP/1.1 302 Found
-Location: https://mcp-api-tavola-v3-6.clicksign.dev/oauth2/authorize?client_id=…
+Location: https://oauth2.clicksign.dev/login?…
 Cache-Control: no-store
 ```
 
 ### 3. Login no Cognito (manual, no browser)
 
-Esse passo **só pode ser feito num browser real** porque envolve telas de login do Cognito/Clicksign:
-
 1. Abra o `authorize_url` (ou o shortlink) em uma aba anônima
 2. Faça login com sua conta Clicksign
-3. Você será redirecionado para `http://localhost:8080/oauth2/callback?code=…&state=…`
+3. Você será redirecionado para `{PUBLIC_BASE_URL}/oauth2/callback?code=…&state=…`
 4. Verá a página HTML de sucesso ✅
-5. Se `N8N_WEBHOOK_URL` estiver configurado no `.env`, o n8n também recebe um POST com `event: "oauth_success"`
+5. Se `N8N_WEBHOOK_URL` estiver configurado, o n8n recebe um POST com `event: "oauth_success"`
 
-### 4. Mensagem após autenticação → `ok` com tool-calling
-
-Agora a mesma rota com o usuário já autenticado:
+### 4. Pedido autenticado — listar templates
 
 ```bash
 curl -s -X POST "$BASE_URL/api/messages" \
@@ -116,17 +127,27 @@ curl -s -X POST "$BASE_URL/api/messages" \
   }' | jq
 ```
 
-Resposta:
+Se o usuário tem **uma conta só**, vem direto a lista de templates. Se tem múltiplas contas, a resposta carrega uma **lista interativa** com as contas:
 
 ```json
 {
   "status": "ok",
-  "reply": "Você tem 3 templates: …",
-  "tool_calls": [{"name": "list_templates", "ok": true}]
+  "reply": "Você tem mais de uma conta Clicksign. Qual quer usar agora?",
+  "interactive": {
+    "type": "list",
+    "header": "Escolha a conta",
+    "items": [
+      {"id": "1b34…293", "title": "Carlos Mikael", "description": "1b34…293"},
+      {"id": "5b8a…2ea", "title": "name LTDA", "description": "5b8a…2ea"}
+    ]
+  },
+  "flow_state": {"flow_id": "select_account", "step": "awaiting_choice"}
 }
 ```
 
-### 5. Pedido com ação (envio de envelope)
+### 5. Resposta a uma lista interativa
+
+Quando o usuário clica num item, o n8n envia o `list_item_id` correspondente:
 
 ```bash
 curl -s -X POST "$BASE_URL/api/messages" \
@@ -134,12 +155,14 @@ curl -s -X POST "$BASE_URL/api/messages" \
   -H "Content-Type: application/json" \
   -d '{
     "phone_number": "'"$PHONE"'",
-    "message": "envia o template Contrato Padrão para joao@example.com",
-    "message_id": "wamid.0003"
+    "interactive_reply": {"list_item_id": "1b34…293"},
+    "message_id": "wamid.0002.click"
   }' | jq
 ```
 
-O LLM pode pedir confirmação antes (depende do system prompt). Se pedir, mande:
+O flow `select_account` salva a `PreferredAccount` na sessão e **transfere** automaticamente para o flow original (`list_templates`).
+
+### 6. Criar envelope a partir de PDF (URL)
 
 ```bash
 curl -s -X POST "$BASE_URL/api/messages" \
@@ -147,12 +170,30 @@ curl -s -X POST "$BASE_URL/api/messages" \
   -H "Content-Type: application/json" \
   -d '{
     "phone_number": "'"$PHONE"'",
-    "message": "sim, pode enviar",
-    "message_id": "wamid.0004"
+    "message": "envia esse PDF https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf, nome do envelope Contrato Stg 1, signatário Mikael Nunes mikael@example.com como parte",
+    "message_id": "wamid.0006"
   }' | jq
 ```
 
-### 6. Mensagem com anexo
+Resposta típica (`awaiting_confirm`):
+
+```json
+{
+  "status": "ok",
+  "reply": "Quer que eu envie o envelope abaixo? *Contrato Stg 1* (1 documento, 1 signatário)",
+  "interactive": {
+    "type": "buttons",
+    "body": "*Contrato Stg 1*\n• Mikael Nunes (mikael@example.com) — parte",
+    "items": [
+      {"id": "confirm_yes", "title": "Sim, enviar"},
+      {"id": "confirm_no", "title": "Não"}
+    ]
+  },
+  "flow_state": {"flow_id": "create_envelope_pdf", "step": "awaiting_confirm"}
+}
+```
+
+E para confirmar:
 
 ```bash
 curl -s -X POST "$BASE_URL/api/messages" \
@@ -160,16 +201,56 @@ curl -s -X POST "$BASE_URL/api/messages" \
   -H "Content-Type: application/json" \
   -d '{
     "phone_number": "'"$PHONE"'",
-    "message": "envia esse contrato pra maria@example.com",
-    "attachments": [
-      {
-        "url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
-        "mime_type": "application/pdf",
-        "filename": "contrato.pdf"
-      }
-    ],
-    "message_id": "wamid.0005"
+    "interactive_reply": {"button_id": "confirm_yes"},
+    "message_id": "wamid.0008"
   }' | jq
+```
+
+### 7. Criar envelope com PDF vindo do WhatsApp
+
+O n8n deve **re-hospedar** a mídia do WhatsApp numa URL pública (Estratégia A — ver `N8N_INTEGRATION_CONTRACT.md`) e passar o link em `attachments[0].url`:
+
+```bash
+curl -s -X POST "$BASE_URL/api/messages" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "phone_number": "'"$PHONE"'",
+    "message": "manda esse contrato pra Maria Souza maria@empresa.com como parte",
+    "attachments": [{
+      "url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+      "mime_type": "application/pdf",
+      "filename": "contrato.pdf"
+    }],
+    "message_id": "wamid.0007"
+  }' | jq
+```
+
+O flow usa `attachments[0].url` como `pdf_url` automaticamente (sem precisar repetir no texto).
+
+### 8. Listar / consultar status / cancelar / adicionar signatário
+
+| O que o usuário diz | Intent | Comportamento |
+|---|---|---|
+| "liste meus envelopes em andamento" | `list_envelopes` (filter_status=running) | Lista interativa; clique → status |
+| "qual o status do envelope Contrato 1?" | `envelope_status` | 1 match → detalhes; N matches → lista; 0 → mensagem amigável |
+| "adicione Maria Souza maria@empresa.com como parte no envelope Contrato 1" | `add_signer` | Valida nome/e-mail/papel → confirmação → POST `/envelopes/{id}/signers` |
+| "cancela o envelope Contrato 1" | `cancel_envelope` | Pré-check: só envelopes em `draft` podem ser excluídos via API; se sim → botão destrutivo |
+
+A collection do Postman tem uma request para cada cenário (folder *2. Flows (Option B)*).
+
+### 9. Saudação / off-topic
+
+```bash
+# saudação → resposta estática llm.Capabilities()
+curl -s -X POST "$BASE_URL/api/messages" \
+  -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"phone_number":"'"$PHONE"'","message":"bom dia! O que você pode fazer?","message_id":"wamid.x1"}'
+
+# off-topic → resposta estática llm.OffTopic() (NLU e flows nem são chamados)
+curl -s -X POST "$BASE_URL/api/messages" \
+  -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"phone_number":"'"$PHONE"'","message":"quanto é 2+2?","message_id":"wamid.x2"}'
 ```
 
 ---
@@ -203,32 +284,24 @@ curl -s -X POST "$BASE_URL/api/messages" \
   -d '{}' | jq
 ```
 
-Resposta:
-
 ```json
 {
   "status": "error",
   "reply": "Não recebi seus dados corretamente. Tente enviar novamente?",
-  "error": {"code": "INVALID_INPUT", "details": "phone_number and message are required"}
+  "error": {"code": "INVALID_INPUT", "details": "phone_number is required"}
 }
 ```
 
 ### Idempotência (mesma `message_id` em < 60s)
 
-Mande a mesma requisição duas vezes seguidas com o mesmo `message_id`. A segunda volta com `reply` vazio (não chama o LLM):
-
 ```bash
 PAYLOAD='{"phone_number":"'"$PHONE"'","message":"oi","message_id":"wamid.dup-001"}'
 
-curl -s -X POST "$BASE_URL/api/messages" \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "$PAYLOAD" | jq
+curl -s -X POST "$BASE_URL/api/messages" -H "Authorization: Bearer $API_TOKEN" \
+  -H "Content-Type: application/json" -d "$PAYLOAD" | jq
 
-curl -s -X POST "$BASE_URL/api/messages" \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "$PAYLOAD" | jq
+curl -s -X POST "$BASE_URL/api/messages" -H "Authorization: Bearer $API_TOKEN" \
+  -H "Content-Type: application/json" -d "$PAYLOAD" | jq
 # segunda chamada: {"status":"ok","reply":""}
 ```
 
@@ -243,9 +316,11 @@ curl -s -o /dev/null -w "%{http_code}\n" "$BASE_URL/c/INEXISTENTE"
 
 ## Ordem sugerida para a demo
 
-1. `GET /healthz` → confirma que está no ar
+1. `GET /healthz` — confirma que está no ar
 2. `POST /api/messages` "olá" → recebe `needs_auth`
-3. Abre o `authorize_url` no browser → login → redireciona para `/oauth2/callback` → vê página de sucesso (e o n8n recebe webhook se configurado)
-4. `POST /api/messages` "liste meus templates" → resposta natural com tool-calling
-5. `POST /api/messages` com pedido de envio → confirmação → envio
-6. (opcional) Mostra idempotência e erros
+3. Abre o `authorize_url` no browser → login → callback → vê página de sucesso (e o n8n recebe webhook se configurado)
+4. `POST /api/messages` "liste meus templates" → seleciona conta (interactive) → recebe a lista
+5. `POST /api/messages` "envia esse PDF …" → recebe card de confirmação → clica `confirm_yes` → envelope criado
+6. `POST /api/messages` "adicione Maria …" → confirma → signer adicionado
+7. (opcional) "cancela o envelope X" → mostra que só `draft` pode ser excluído
+8. (opcional) Mostra idempotência e erros

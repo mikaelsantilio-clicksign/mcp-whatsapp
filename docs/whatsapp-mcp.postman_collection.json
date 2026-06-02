@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "whatsapp-mcp",
-    "description": "Simulação do fluxo n8n → whatsapp-mcp (POST /api/messages com Bearer estático). Inclui health check, fluxo OAuth needs_auth com captura automática do authorize_url/shortlink, conversa autenticada (com tool-calling MCP), idempotência e casos de erro.\n\nOrdem sugerida:\n1. Health\n2. Fluxo OAuth → First message → Follow shortlink → (login manual no browser)\n3. Conversa → liste templates → enviar envelope\n4. Casos de erro\n\nDefina `api_token` no environment com o mesmo valor de `API_STATIC_TOKEN` do .env do servidor.",
+    "description": "Simulação do fluxo n8n → whatsapp-mcp (POST /api/messages com Bearer estático).\n\nPipeline ativo: NLU + Guided Flow (Option B). Mensagens de texto livre passam pelo classifier → NLU → router de flows; cliques (lists/buttons) chegam em `interactive_reply` e vão direto pro flow ativo.\n\nOrdem sugerida:\n1. Health\n2. OAuth flow → First message → Follow shortlink → (login manual no browser)\n3. Flows Option B → liste templates / envelopes / cria envelope / add signer / cancel\n4. Error cases (auth, body inválido, idempotência)\n\nDefina `api_token` no environment com o mesmo valor de `API_STATIC_TOKEN` do `.env`.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "_postman_id": "8b3e4c7a-2a1f-4e2b-9a3d-7c4f0a1d2c10"
   },
@@ -67,7 +67,7 @@
         },
         {
           "name": "Follow shortlink (302 → authorize_url)",
-          "description": "Reproduz o que o usuário faz ao clicar no link curto recebido no WhatsApp. Deve retornar 302 com Location apontando para o /oauth2/authorize da Clicksign.",
+          "description": "Reproduz o que o usuário faz ao clicar no link curto recebido no WhatsApp. Deve retornar 302 com Location apontando para o /login do Cognito da Clicksign.",
           "protocolProfileBehavior": {"followRedirects": false},
           "request": {
             "method": "GET",
@@ -80,7 +80,7 @@
         },
         {
           "name": "(manual) Open authorize_url in browser",
-          "description": "Cole o valor de `{{authorize_url}}` em uma aba anônima do navegador. Faça login na Clicksign. Você será redirecionado para `{{base_url}}/oauth2/callback?code=…&state=…`, verá a página HTML de sucesso e (se N8N_WEBHOOK_URL estiver setado) o n8n receberá o webhook `oauth_success`.",
+          "description": "Cole o valor de `{{authorize_url}}` em uma aba anônima. Faça login na Clicksign. Você será redirecionado para `{{base_url}}/oauth2/callback?code=…&state=…`, verá a página HTML de sucesso e (se N8N_WEBHOOK_URL estiver setado) o n8n receberá o webhook `oauth_success`.",
           "request": {
             "method": "GET",
             "header": [],
@@ -93,10 +93,11 @@
       ]
     },
     {
-      "name": "2. Authenticated conversation",
+      "name": "2. Flows (Option B)",
       "item": [
         {
-          "name": "List templates",
+          "name": "Listar templates",
+          "description": "intent=list_templates. Quando o usuário tem múltiplas contas, a resposta vem com `interactive` (list de contas) e `flow_state.flow_id=select_account`. O próximo turno deve mandar `interactive_reply.list_item_id` = account_key.",
           "request": {
             "method": "POST",
             "header": [
@@ -116,7 +117,8 @@
           }
         },
         {
-          "name": "Send envelope (template)",
+          "name": "Selecionar conta (interactive_reply)",
+          "description": "Use depois de receber a lista de contas. Substitua `account-key-uuid` pelo id do item clicado (vem em `interactive.items[i].id`).",
           "request": {
             "method": "POST",
             "header": [
@@ -125,7 +127,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"envia o template Contrato Padrão para joao@example.com\",\n  \"message_id\": \"wamid.0003\"\n}",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"interactive_reply\": { \"list_item_id\": \"<account-key-uuid>\" },\n  \"message_id\": \"wamid.0002.click\"\n}",
               "options": {"raw": {"language": "json"}}
             },
             "url": {
@@ -136,7 +138,8 @@
           }
         },
         {
-          "name": "Confirm send",
+          "name": "Listar envelopes",
+          "description": "intent=list_envelopes (sem filtro). A resposta vem com `interactive` (lista de envelopes); clicar em uma linha transfere para envelope_status.",
           "request": {
             "method": "POST",
             "header": [
@@ -145,7 +148,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"sim, pode enviar\",\n  \"message_id\": \"wamid.0004\"\n}",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"liste meus envelopes\",\n  \"message_id\": \"wamid.0003\"\n}",
               "options": {"raw": {"language": "json"}}
             },
             "url": {
@@ -156,7 +159,8 @@
           }
         },
         {
-          "name": "Message with attachment",
+          "name": "Listar envelopes em andamento",
+          "description": "intent=list_envelopes com filter_status=running. NLU normaliza pt-BR → enum canônico Clicksign.",
           "request": {
             "method": "POST",
             "header": [
@@ -165,7 +169,133 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"envia esse contrato pra maria@example.com\",\n  \"attachments\": [\n    {\n      \"url\": \"https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf\",\n      \"mime_type\": \"application/pdf\",\n      \"filename\": \"contrato.pdf\"\n    }\n  ],\n  \"message_id\": \"wamid.0005\"\n}",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"liste meus envelopes em andamento\",\n  \"message_id\": \"wamid.0004\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Status de envelope por nome",
+          "description": "intent=envelope_status. Faz fuzzy match em `envelope_name`; 1 match → detalhes; N matches → lista pra escolher; 0 → mensagem amigável.",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"qual o status do envelope Contrato Stg 1?\",\n  \"message_id\": \"wamid.0005\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Criar envelope (PDF por URL)",
+          "description": "intent=create_envelope_pdf. NLU extrai pdf_url, envelope_name e signers; o flow valida (papel PT→EN, e-mail, nome completo) e responde com card de confirmação + botões.\n\nSe faltar campo, vem KindAsk. Se signer for inválido (e-mail/nome ruim), vem com a lista de problemas.",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"envia esse PDF https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf, nome do envelope Contrato Stg 1, signatário Mikael Nunes mikael@example.com como parte\",\n  \"message_id\": \"wamid.0006\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Criar envelope (PDF por anexo do WhatsApp)",
+          "description": "Mesma intent, mas o PDF veio como mídia do WhatsApp e o n8n já re-hospeda em URL pública (Estratégia A, ver docs/N8N_INTEGRATION_CONTRACT.md). O flow usa `attachments[0].url` como pdf_url automaticamente.",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"manda esse contrato pra Maria Souza maria@empresa.com como parte\",\n  \"attachments\": [\n    {\n      \"url\": \"https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf\",\n      \"mime_type\": \"application/pdf\",\n      \"filename\": \"contrato.pdf\"\n    }\n  ],\n  \"message_id\": \"wamid.0007\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Confirmar criação (button click)",
+          "description": "Depois do card de confirmação (`flow_state.step=awaiting_confirm`). `button_id=confirm_yes` dispara POST /envelope_bulk_creations. `confirm_no` cancela com mensagem amigável.",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"interactive_reply\": { \"button_id\": \"confirm_yes\" },\n  \"message_id\": \"wamid.0008\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Adicionar signatário a envelope",
+          "description": "intent=add_signer. NLU extrai envelope (id ou nome) e o primeiro signer (name/email/role). O flow valida e pede confirmação antes de POSTar.",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"adicione o signatário Maria Souza maria@empresa.com como parte no envelope Contrato Stg 1\",\n  \"message_id\": \"wamid.0009\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Cancelar / excluir envelope (draft)",
+          "description": "intent=cancel_envelope. O flow faz pre-flight: se o envelope não estiver em `draft`, recusa antes de oferecer o botão (Clicksign v3 não cancela envelopes em andamento via API). Caso esteja em draft, mostra o card destrutivo com `confirm_yes`/`confirm_no`.",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"cancela o envelope Contrato Stg 1\",\n  \"message_id\": \"wamid.0010\"\n}",
               "options": {"raw": {"language": "json"}}
             },
             "url": {
@@ -178,7 +308,54 @@
       ]
     },
     {
-      "name": "3. Error cases",
+      "name": "3. Off-topic & capabilities",
+      "item": [
+        {
+          "name": "Saudação (meta_help)",
+          "description": "Classifier marca como meta_help → resposta estática `llm.Capabilities()` sem custo do NLU.",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"bom dia! O que você pode fazer aqui?\",\n  \"message_id\": \"wamid.0011\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        },
+        {
+          "name": "Off-topic",
+          "description": "Classifier marca como off_topic → resposta `llm.OffTopic()` sem chamar NLU nem flows.",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Authorization", "value": "Bearer {{api_token}}"},
+              {"key": "Content-Type", "value": "application/json"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"message\": \"quanto é 2 + 2?\",\n  \"message_id\": \"wamid.0012\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/messages",
+              "host": ["{{base_url}}"],
+              "path": ["api", "messages"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Error cases",
       "item": [
         {
           "name": "No Authorization header → 401",

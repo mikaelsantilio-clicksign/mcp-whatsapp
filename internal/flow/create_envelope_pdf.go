@@ -2,6 +2,7 @@ package flow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,12 +17,12 @@ import (
 // a PDF (URL or WhatsApp attachment). The conversation has two visible
 // steps:
 //
-//   1. gathering — collect envelope_name, pdf_url and signers. Each turn
-//      merges new entities with what we already have. When something is
-//      still missing we send a KindAsk listing what we need.
-//   2. awaiting_confirm — present a snapshot of the envelope and ask the
-//      user to tap "Confirmar" or "Cancelar". On confirm we download the
-//      file and call POST /envelope_bulk_creations.
+//  1. gathering — collect envelope_name, pdf_url and signers. Each turn
+//     merges new entities with what we already have. When something is
+//     still missing we send a KindAsk listing what we need.
+//  2. awaiting_confirm — present a snapshot of the envelope and ask the
+//     user to tap "Confirmar" or "Cancelar". On confirm we download the
+//     file and call POST /envelope_bulk_creations.
 //
 // State that survives across turns lives in FlowState.Data (JSON-safe).
 type CreateEnvelopePDFFlow struct {
@@ -425,25 +426,95 @@ func humanFetchErr(err error) string {
 }
 
 // humanAPIError tries to extract a useful sentence from an *APIError or a
-// generic error message. We never echo the raw JSON body to the user.
+// generic error message. When the body is JSON:API shaped we surface the
+// first `errors[].detail` (or title) verbatim because Clicksign already
+// writes those messages in pt-BR ("documentation - inválido", "envelope
+// não está com status draft", etc.). When the body is silent we fall
+// back to a stable per-code phrase. We never echo the raw JSON body to
+// the user.
 func humanAPIError(err error) string {
 	var apiErr *clicksign.APIError
 	if errors.As(err, &apiErr) {
-		switch apiErr.Status {
-		case 400:
-			return "alguns campos não passaram na validação (verifique nome, e-mail e papel dos signatários)"
-		case 401, 403:
-			return "sua sessão Clicksign expirou ou perdeu acesso a esta conta"
-		case 422:
-			return "a Clicksign retornou erro de regra de negócio (ex.: papel inválido para a conta)"
-		case 429:
-			return "muitas requisições — tenta em alguns minutos"
-		case 500, 502, 503, 504:
-			return "a Clicksign está com instabilidade no momento"
+		if detail := extractAPIErrorDetail(apiErr.Body); detail != "" {
+			return detail
 		}
-		return fmt.Sprintf("erro %d da Clicksign", apiErr.Status)
+		return defaultErrorForStatus(apiErr.Status)
 	}
 	return "erro ao chamar a Clicksign"
+}
+
+// defaultErrorForStatus is the stable per-code fallback when the JSON:API
+// body is missing or unparseable.
+func defaultErrorForStatus(status int) string {
+	switch status {
+	case 400:
+		return "alguns campos não passaram na validação (verifique nome, e-mail e papel dos signatários)"
+	case 401, 403:
+		return "sua sessão Clicksign expirou ou perdeu acesso a esta conta"
+	case 404:
+		return "esse registro não foi encontrado na conta selecionada"
+	case 422:
+		return "a Clicksign recusou os dados (regra de negócio)"
+	case 429:
+		return "muitas requisições — tenta em alguns minutos"
+	case 500, 502, 503, 504:
+		return "a Clicksign está com instabilidade no momento"
+	}
+	return fmt.Sprintf("erro %d da Clicksign", status)
+}
+
+// extractAPIErrorDetail parses the JSON:API error envelope:
+//
+//	{"errors":[{"title":"...","detail":"...","source":{"pointer":"..."}}]}
+//
+// It returns a short pt-BR sentence built from the first error entry.
+// When the pointer is present we strip the JSON Pointer prefix
+// ("/data/attributes/foo" → "foo") so the user sees a clean field name.
+// Returns "" when the body isn't recognisably JSON:API.
+func extractAPIErrorDetail(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var envelope struct {
+		Errors []struct {
+			Title  string `json:"title"`
+			Detail string `json:"detail"`
+			Code   any    `json:"code"`
+			Source struct {
+				Pointer string `json:"pointer"`
+			} `json:"source"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || len(envelope.Errors) == 0 {
+		return ""
+	}
+	first := envelope.Errors[0]
+	detail := strings.TrimSpace(first.Detail)
+	if detail == "" {
+		detail = strings.TrimSpace(first.Title)
+	}
+	if detail == "" {
+		return ""
+	}
+	if field := jsonPointerField(first.Source.Pointer); field != "" && !strings.Contains(strings.ToLower(detail), strings.ToLower(field)) {
+		return fmt.Sprintf("%s: %s", field, detail)
+	}
+	return detail
+}
+
+// jsonPointerField turns a JSON Pointer like "/data/attributes/documentation"
+// into "documentation". Returns the empty string when the pointer is empty
+// or doesn't follow the JSON:API convention.
+func jsonPointerField(pointer string) string {
+	pointer = strings.TrimSpace(pointer)
+	if pointer == "" {
+		return ""
+	}
+	parts := strings.Split(pointer, "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(parts[len(parts)-1])
 }
 
 var _ Flow = (*CreateEnvelopePDFFlow)(nil)

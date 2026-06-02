@@ -19,7 +19,7 @@ import (
 
 // FlowPipeline implements the Option B request pipeline:
 //
-//   classifier (intent gate) → NLU (intent + entities) → router (flows)
+//	classifier (intent gate) → NLU (intent + entities) → router (flows)
 //
 // Each Flow returns a typed Result that this pipeline turns into a
 // MessageResponse (text, list message or quick-reply buttons). Multi-turn

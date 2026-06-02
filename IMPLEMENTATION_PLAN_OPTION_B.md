@@ -867,12 +867,24 @@ Cada fase entrega valor mensurável e é mergeable. Feature flag `PIPELINE` em `
 
 **Critério**: cancelar envelope com confirmação obrigatória; adicionar signer a envelope existente.
 
-### Fase 5 — Polimento + remoção do legado (0.5 dia)
+### Fase 5 — Polimento + remoção do legado (0.5 dia) ✅
 
-- Mensagens de erro humanizadas por path (multi-account, validação de signer, etc.).
-- Testes E2E (Postman).
-- Remove `internal/mcpclient` (ou mantém atrás de flag para rollback rápido).
-- Atualiza `README.md`, `IMPLEMENTATION_PLAN.md`.
+- ✅ Mensagens de erro humanizadas: `humanAPIError` agora extrai `errors[].detail` JSON:API e formata com o nome do campo a partir do `source.pointer` (ex.: `documentation: inválido`). Fallback per-status mantido. Cobertura em `internal/flow/errors_test.go`.
+- ✅ Collection Postman regravada para Option B (`docs/whatsapp-mcp.postman_collection.json`): folders Health, OAuth flow, Flows (Option B), Off-topic & capabilities, Error cases. Documento `docs/POSTMAN.md` reescrito com exemplos de `interactive_reply`, lista de contas e card de confirmação.
+- ✅ Pipeline legacy removido por completo (não ficou atrás de flag — o pipeline novo está estável e os testes cobrem todos os fluxos):
+    - Deletados: `internal/mcpclient/*`, `internal/llm/openai.go` (Conversation), `internal/llm/history.go` + test, `internal/llm/meta.go` + test, `internal/llm/prompts.go`, `internal/llm/prompts/system.md`, `internal/llm/prompts/meta_help.md`.
+    - `internal/llm` enxugado: agora só `replies.go` com os templates pt-BR realmente usados (auth, off-topic, capabilities estáticos, etc.).
+    - `internal/conv` simplificado: só `Attachment` + `ErrSessionExpired`.
+    - `internal/api/messages_handler.go` colapsa o switch legacy/flow; sempre roda o `FlowPipeline`.
+    - `internal/config/config.go` remove `Pipeline`, `OpenAIMaxToolIterations`, `MetaHelp*` e o `MCP_OAUTH_SCOPES`. Mantém `MCPServerBaseURL`/`MCPEndpointPath` apenas para `OAUTH_MODE=mcp` (rollback emergencial).
+    - `go mod tidy` removeu `mark3labs/mcp-go`.
+- ✅ `README.md` reescrito do zero focando no pipeline Option B, OAuth direto, tabela de intents suportadas e tabela de env vars.
+
+Smoke final (2026-06-01):
+
+- `go test ./...` → todos verdes (`classifier`, `clicksign`, `flow`, `nlu`, `oauth`, `session`).
+- `docker compose up -d --build app` → log `oauth_mode_direct` + `flow_pipeline_built` + `server_starting redirect_uri=https://…/oauth2/callback`.
+- `POST /api/messages` para usuário novo → `status="needs_auth"` com `authorize_url` apontando para `https://oauth2.clicksign.dev/login` (sem fachada MCP).
 
 ### Total revisado: 4–5 dias
 

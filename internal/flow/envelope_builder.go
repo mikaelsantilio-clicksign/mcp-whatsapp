@@ -20,10 +20,10 @@ import (
 // the raw role the user typed (Signer.RoleRaw) so the confirmation
 // message can echo "como parte" rather than the technical "as party".
 type EnvelopeDraft struct {
-	Name        string
-	Document    DocumentDraft
-	Signers     []ValidatedSignerWithRaw
-	Message     string // notification message; defaults sensibly when empty
+	Name     string
+	Document DocumentDraft
+	Signers  []ValidatedSignerWithRaw
+	Message  string // notification message; defaults sensibly when empty
 }
 
 // DocumentDraft holds either a remote PDF URL (the most common path) or

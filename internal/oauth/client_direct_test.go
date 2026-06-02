@@ -171,10 +171,10 @@ func TestMCPClient_TokenRequest_DoesNotInjectSecret(t *testing.T) {
 	mdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                  r.Host,
-			"authorization_endpoint":  "https://example/authorize",
-			"token_endpoint":          tokenSrv.URL,
-			"registration_endpoint":   "https://example/register",
+			"issuer":                 r.Host,
+			"authorization_endpoint": "https://example/authorize",
+			"token_endpoint":         tokenSrv.URL,
+			"registration_endpoint":  "https://example/register",
 		})
 	}))
 	defer mdSrv.Close()

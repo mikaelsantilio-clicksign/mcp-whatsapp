@@ -16,14 +16,14 @@ import (
 //
 // It can be reached in three ways:
 //
-//   1. NLU classified the message as intent=select_account (e.g. the user
-//      said "use a conta 3"). When entities.account_index is set, we
-//      resolve the index against the live account list and finish.
-//   2. Another flow detected the multi-account error and transferred to
-//      us with Data["return_to"]=<originator>. We list accounts and let
-//      the user pick.
-//   3. The previous turn was the list-message and the current turn is an
-//      interactive_reply with the chosen account key.
+//  1. NLU classified the message as intent=select_account (e.g. the user
+//     said "use a conta 3"). When entities.account_index is set, we
+//     resolve the index against the live account list and finish.
+//  2. Another flow detected the multi-account error and transferred to
+//     us with Data["return_to"]=<originator>. We list accounts and let
+//     the user pick.
+//  3. The previous turn was the list-message and the current turn is an
+//     interactive_reply with the chosen account key.
 type SelectAccountFlow struct {
 	cs *clicksign.Client
 }

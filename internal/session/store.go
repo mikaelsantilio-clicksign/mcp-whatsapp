@@ -13,11 +13,11 @@ var (
 
 // Session represents an authenticated user (keyed by phone_number).
 type Session struct {
-	PhoneNumber  string     `json:"phone_number"`
-	AccessToken  string     `json:"access_token"`
-	RefreshToken string     `json:"refresh_token"`
-	ExpiresAt    time.Time  `json:"expires_at"`
-	AccountKey   string     `json:"account_key,omitempty"`
+	PhoneNumber  string    `json:"phone_number"`
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	AccountKey   string    `json:"account_key,omitempty"`
 	// PreferredAccount is the Clicksign multi-account key chosen by the user
 	// in a previous turn. Used by the Option B "flow" pipeline as the
 	// X-Account-Key header on every authenticated request. Empty when the

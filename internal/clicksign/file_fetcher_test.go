@@ -110,10 +110,10 @@ func TestHTTPFileFetcher_404(t *testing.T) {
 
 func TestStripMIMEParameters(t *testing.T) {
 	cases := map[string]string{
-		"application/pdf":                 "application/pdf",
-		"application/pdf; charset=utf-8":  "application/pdf",
-		"  text/plain;boundary=xx ":       "text/plain",
-		"":                                "",
+		"application/pdf":                "application/pdf",
+		"application/pdf; charset=utf-8": "application/pdf",
+		"  text/plain;boundary=xx ":      "text/plain",
+		"":                               "",
 	}
 	for in, want := range cases {
 		if got := stripMIMEParameters(in); got != want {

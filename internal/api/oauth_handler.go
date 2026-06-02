@@ -22,12 +22,12 @@ type N8NNotifier interface {
 }
 
 type OAuthHandler struct {
-	cfg     *config.Config
-	logger  *slog.Logger
-	store   session.Store
-	oauth   *oauth.Client
-	signer  *oauth.StateSigner
-	n8n     N8NNotifier
+	cfg    *config.Config
+	logger *slog.Logger
+	store  session.Store
+	oauth  *oauth.Client
+	signer *oauth.StateSigner
+	n8n    N8NNotifier
 }
 
 func NewOAuthHandler(

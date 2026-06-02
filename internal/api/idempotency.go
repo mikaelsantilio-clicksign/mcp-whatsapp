@@ -8,8 +8,8 @@ import (
 // idempotencyCache deduplicates incoming messages by message_id within a
 // short TTL window, protecting against n8n retries.
 type idempotencyCache struct {
-	mu  sync.Mutex
-	ttl time.Duration
+	mu   sync.Mutex
+	ttl  time.Duration
 	seen map[string]time.Time
 }
 
